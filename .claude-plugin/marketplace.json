@@ -1,0 +1,5 @@
+{
+  "name": "manapool",
+  "owner": { "name": "aegisnir" },
+  "plugins": [{ "name": "manapool", "source": "./" }]
+}
