@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""Mana Pool scanner: real token use from Claude Code's own transcripts.
+
+Why this exists: the 5-hour (5H) and weekly (7D) limits are shown as a percent
+only.  Every model call Claude Code makes is logged in
+~/.claude/projects/**/*.jsonl with its exact token counts, so adding those up
+gives the real work behind the percent.  Plain local file reading: it never
+calls a model and costs zero tokens.
+
+Called by the mod (hooks/register.tsx) with:
+  scan.py <window start epoch> [<window start> ...]
+          --session-id=<uuid>   this session: <uuid>.jsonl plus <uuid>/subagents/*.jsonl
+          --since5h=<epoch>     start of the current 5H window
+          --now=<epoch>         the mod's clock
+          --busy=1              a turn is still running (the newest turn is not finished)
+  stdin: {"samples": [...], "ledger": [...]}  what the mod has saved (may be empty)
+
+  scan.py --export=<csv path>   with the same stdin: writes the ledger as CSV
+
+Prints one JSON object (see the bottom of this file for its fields).
+
+Units: "work units" weigh each token by type and model, so a cheap cache read
+does not count like an expensive output token.  1 unit = one Sonnet input
+token at list price.  The weights start at API list prices and switch to
+weights fitted from your own meter ticks once there are enough clean ticks.
+"""
+import csv, glob, json, os, sys
+from datetime import datetime, timezone
+
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+starts, session_id, since5h, now, busy, export = [], "", 0.0, 0.0, False, ""
+for a in sys.argv[1:]:
+    if a.startswith("--session-id="):
+        session_id = a.split("=", 1)[1].strip()
+    elif a.startswith("--since5h="):
+        since5h = float(a.split("=", 1)[1])
+    elif a.startswith("--now="):
+        now = float(a.split("=", 1)[1])
+    elif a.startswith("--busy="):
+        busy = a.split("=", 1)[1] == "1"
+    elif a.startswith("--export="):
+        export = os.path.expanduser(a.split("=", 1)[1])
+    else:
+        starts.append(float(a))
+if not now:
+    now = datetime.now(timezone.utc).timestamp()
+
+try:
+    given = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    given = {}
+samples = given.get("samples") or []
+ledger = given.get("ledger") or []
+
+HOME = os.path.expanduser("~")
+ROOT = os.path.join(HOME, ".claude", "projects")
+SPAN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+
+# ---------------------------------------------------------------------------
+# Weights.  List prices in $ per million tokens, divided by Sonnet's input
+# price ($2), so 1 unit = 1 Sonnet input token.  Order: input, output,
+# cache write (1-hour kind, 2x input), cache read.
+# ---------------------------------------------------------------------------
+LIST = {
+    "fable":  (5.0, 25.0, 10.0, 0.125),
+    "opus":   (2.0, 10.0, 4.0, 0.1),
+    "sonnet": (1.0, 5.0, 2.0, 0.1),
+    "haiku":  (0.05, 0.25, 0.1, 0.005),
+}
+MODELS = ["fable", "opus", "sonnet", "haiku"]
+# A fresh session that takes over through a handoff note does not start from
+# the bare system prompt: it also reads the note and re-reads a few files.
+# Assumed allowance, in tokens (see the manual: "fresh session").
+HANDOFF_EXTRA = 15000
+# Output tokens the old session spends writing the handoff note.
+HANDOFF_NOTE_OUT = 3000
+
+
+def key_of(model):
+    m = (model or "").lower()
+    if "fable" in m or "mythos" in m:
+        return "fable"
+    if "opus" in m:
+        return "opus"
+    if "haiku" in m:
+        return "haiku"
+    return "sonnet"
+
+
+def ts(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+# Fitted multipliers per token type (K) and per model (MM); 1.0 = list price.
+K = [1.0, 1.0, 1.0, 1.0]
+MM = {k: 1.0 for k in MODELS}
+
+
+def w(model_key, prompt):
+    """Unit weight per token type for one call on model_key."""
+    base = LIST[model_key]
+    big = 2.0 if model_key == "haiku" and prompt > 100_000 else 1.0  # Haiku doubles past 100k
+    return [base[i] * K[i] * MM[model_key] * big for i in range(4)]
+
+
+def units(c, model_key=None):
+    """Work units of one call, optionally re-priced on another model."""
+    mk = model_key or c["k"]
+    ww = w(mk, c["p"])
+    return c["i"] * ww[0] + c["o"] * ww[1] + c["w"] * ww[2] + c["r"] * ww[3]
+
+
+def list_units(c):
+    """The same at plain list weights: the fixed yardstick of the ledger.
+    It never changes when the fit does, so old and new rows stay comparable."""
+    L = LIST[c["k"]]
+    big = 2.0 if c["k"] == "haiku" and c["p"] > 100_000 else 1.0
+    return (c["i"] * L[0] + c["o"] * L[1] + c["w"] * L[2] + c["r"] * L[3]) * big
+
+
+# ---------------------------------------------------------------------------
+# CSV export: no transcript reading needed.
+# ---------------------------------------------------------------------------
+def et(epoch):
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(epoch, ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
+    except Exception:
+        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+if export:
+    os.makedirs(os.path.dirname(export), exist_ok=True)
+    cols = ["window", "start", "end", "models", "meter_pct", "work_units_list", "units_per_1pct",
+            "raw_input", "raw_output", "raw_cache_write", "raw_cache_read", "raw_total",
+            "outside_use_pct", "last_reading", "weights", "recorded"]
+    with open(export, "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(cols)
+        for r in sorted(ledger, key=lambda r: (r.get("kind", ""), r.get("start", 0))):
+            t = r.get("tokens") or [0, 0, 0, 0]
+            wr.writerow([
+                "5H" if r.get("kind") == "five_hour" else "7D",
+                et(r.get("start", 0)), et(r.get("end", 0)), " + ".join(r.get("models") or []),
+                r.get("pct", 0), round(r.get("units", 0)), round(r.get("per1", 0)) if r.get("per1") else "",
+                t[0], t[1], t[2], t[3], sum(t),
+                r.get("outside", 0), et(r.get("seen", 0)) if r.get("seen") else "",
+                r.get("weights", "list"), et(r.get("at", 0)) if r.get("at") else "",
+            ])
+    print(json.dumps({"exported": export, "rows": len(ledger)}))
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# (No import of older logs in the public build.)
+# ---------------------------------------------------------------------------
+imported = None
+
+
+def clean(lst):
+    """A window's percent only goes up; a lower reading is stale (another open session)."""
+    top, out = {}, []
+    for s in sorted(lst, key=lambda s: s.get("at", 0)):
+        k = (s.get("kind"), s.get("resetsAt") or "")
+        if s.get("pct", -1) <= top.get(k, -1):
+            continue
+        top[k] = s["pct"]
+        out.append(s)
+    return out
+
+
+samples = clean(samples)
+if imported is not None:
+    imported = samples  # hand back the cleaned copy
+
+
+def win_bounds(kind, resets_at):
+    end = ts(resets_at) if resets_at else 0
+    return (end - SPAN[kind], end) if end else (0, 0)
+
+
+# Windows that have ended and are not in the ledger yet (only those whose
+# transcripts are still on disk: Claude Code keeps about 30 days).
+done = {(r.get("kind"), r.get("resetsAt")) for r in ledger}
+closing = {}
+for s in samples:
+    k = (s.get("kind"), s.get("resetsAt"))
+    if k[0] not in SPAN or not k[1] or k in done:
+        continue
+    st, en = win_bounds(*k)
+    if en and en <= now and st >= now - 29 * 86400:
+        closing[k] = (st, en)
+
+# How far back to read: the oldest window asked for, every closing window,
+# and every saved tick (for the weight fit).
+oldest = min([*starts, *(b[0] for b in closing.values()), now - 3600] or [now])
+for s in samples:
+    if s.get("kind") == "five_hour" and s.get("resetsAt"):
+        oldest = min(oldest, win_bounds("five_hour", s["resetsAt"])[0])
+oldest = max(oldest, now - 29 * 86400)
+
+# ---------------------------------------------------------------------------
+# One pass over the transcripts.
+# ---------------------------------------------------------------------------
+calls = {}       # message id -> call (one reply is logged several times while it streams: keep the last copy)
+prompts = []     # your own messages in THIS session: (time, uuid)
+all_prompts = [] # every session's own messages (turn counts per window)
+compactions = [] # this session's auto-compacts: (time, tokens before)
+auto_pre = []    # tokens-before of recent auto-compacts anywhere (the real trigger point)
+main_path = ""
+sub_dir = f"{os.sep}{session_id}{os.sep}subagents{os.sep}" if session_id else None
+last_main = None  # newest main-thread assistant record in this session
+
+for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+    try:
+        if os.path.getmtime(path) < oldest:
+            continue
+    except OSError:
+        continue
+    is_main = bool(session_id) and os.path.basename(path) == session_id + ".jsonl"
+    is_sub = bool(sub_dir) and sub_dir in path
+    if is_main:
+        main_path = path
+    try:
+        f = open(path, "r", errors="ignore")
+    except OSError:
+        continue
+    with f:
+        for line in f:
+            if '"compact_boundary"' in line:
+                try:
+                    d = json.loads(line)
+                    if d.get("subtype") == "compact_boundary":
+                        md = d.get("compactMetadata") or {}
+                        t = ts(d.get("timestamp", ""))
+                        if md.get("trigger") == "auto" and md.get("preTokens"):
+                            auto_pre.append(md["preTokens"])
+                        if is_main:
+                            compactions.append((t, md.get("preTokens") or 0, md.get("trigger") or ""))
+                except Exception:
+                    pass
+                continue
+            if '"type":"user"' in line and '"tool_result"' not in line:
+                # Your own message (not a tool result, not a system note, not a summary)
+                try:
+                    d = json.loads(line)
+                    if d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"):
+                        continue
+                    c = (d.get("message") or {}).get("content")
+                    real = isinstance(c, str) or (isinstance(c, list) and any(
+                        isinstance(b, dict) and b.get("type") == "text" for b in c))
+                    if real:
+                        t = ts(d.get("timestamp", ""))
+                        if t >= oldest:
+                            all_prompts.append(t)
+                        if is_main:
+                            prompts.append(t)
+                except Exception:
+                    pass
+                continue
+            if '"usage"' not in line or '"assistant"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            m = d.get("message") or {}
+            u = m.get("usage")
+            if d.get("type") != "assistant" or not u or m.get("model") == "<synthetic>":
+                continue
+            t = ts(d.get("timestamp", ""))
+            if t < oldest and not is_main:
+                continue
+            i = u.get("input_tokens", 0) or 0
+            w_ = u.get("cache_creation_input_tokens", 0) or 0
+            r = u.get("cache_read_input_tokens", 0) or 0
+            c = {"t": t, "k": key_of(m.get("model")), "model": m.get("model", "?"),
+                 "i": i, "o": u.get("output_tokens", 0) or 0, "w": w_, "r": r, "p": i + w_ + r,
+                 "main": is_main and not d.get("isSidechain"), "sub": is_sub or (is_main and d.get("isSidechain")),
+                 "stop": m.get("stop_reason")}
+            key = m.get("id") or d.get("uuid")
+            prev = calls.get(key)
+            if prev is None or t >= prev["t"]:
+                calls[key] = c
+            if c["main"] and (last_main is None or t >= last_main["t"]):
+                last_main = c
+
+CALLS = sorted(calls.values(), key=lambda c: c["t"])
+prompts.sort()
+all_prompts.sort()
+
+# Ticks taken over from v2 carry no list units yet: add them (the window's
+# list units from its start up to the moment of the reading).
+if imported is not None:
+    for s in imported:
+        if "lu" not in s and s.get("kind") in SPAN and s.get("resetsAt"):
+            st = win_bounds(s["kind"], s["resetsAt"])[0]
+            if st >= oldest:
+                s["lu"] = round(sum(list_units(c) for c in CALLS if st <= c["t"] <= s["at"]))
+
+# ---------------------------------------------------------------------------
+# Weight fit from real meter ticks (5H only: it moves often enough).
+# A tick = two readings in a row of the same window.  Its local work is every
+# call between the two readings.  Needs enough clean ticks to trust.
+# ---------------------------------------------------------------------------
+def solve3(A, b):
+    """Least squares for 3 unknowns, by the normal equations (no numpy here)."""
+    n = 3
+    M = [[sum(A[r][i] * A[r][j] for r in range(len(A))) for j in range(n)] for i in range(n)]
+    v = [sum(A[r][i] * b[r] for r in range(len(A))) for i in range(n)]
+    # Gaussian elimination with partial pivoting
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-30:
+            return None
+        M[col], M[piv] = M[piv], M[col]
+        v[col], v[piv] = v[piv], v[col]
+        for r in range(col + 1, n):
+            f = M[r][col] / M[col][col]
+            for c2 in range(col, n):
+                M[r][c2] -= f * M[col][c2]
+            v[r] -= f * v[col]
+    x = [0.0] * n
+    for r in range(n - 1, -1, -1):
+        x[r] = (v[r] - sum(M[r][c2] * x[c2] for c2 in range(r + 1, n))) / M[r][r]
+    return x
+
+
+def calls_between(a, b):
+    # CALLS is sorted by time; a linear filter is fine at these sizes
+    return [c for c in CALLS if a < c["t"] <= b]
+
+
+ticks = []  # (dp, [list-weighted output, write(+input), read], {model: list units}, start, end)
+by_win = {}
+for s in samples:
+    if s.get("kind") == "five_hour" and s.get("resetsAt"):
+        by_win.setdefault(s["resetsAt"], []).append(s)
+for ra, lst in by_win.items():
+    lst.sort(key=lambda s: s["at"])
+    for a, b in zip(lst, lst[1:]):
+        dp = b["pct"] - a["pct"]
+        if dp <= 0 or a["at"] < oldest:
+            continue
+        x = [0.0, 0.0, 0.0]
+        per_model = {}
+        for c in calls_between(a["at"], b["at"]):
+            L = LIST[c["k"]]
+            big = 2.0 if c["k"] == "haiku" and c["p"] > 100_000 else 1.0
+            x[0] += c["o"] * L[1] * big
+            x[1] += (c["w"] * L[2] + c["i"] * L[0]) * big
+            x[2] += c["r"] * L[3] * big
+            per_model[c["k"]] = per_model.get(c["k"], 0.0) + (c["o"] * L[1] + c["w"] * L[2] + c["i"] * L[0] + c["r"] * L[3]) * big
+        ticks.append((dp, x, per_model, a["at"], b["at"]))
+
+fit = {"source": "list", "ticks": len(ticks), "r2": None, "K": [1, 1, 1, 1], "MM": dict(MM), "model_ticks": {}}
+usable = [t for t in ticks if sum(t[1]) > 0]
+if len(usable) >= 15:
+    A = [t[1] for t in usable]
+    b = [t[0] for t in usable]
+    x = solve3(A, b)
+    if x and all(v > 0 for v in x):
+        pred = [sum(A[r][i] * x[i] for i in range(3)) for r in range(len(A))]
+        mean = sum(b) / len(b)
+        ss_res = sum((b[r] - pred[r]) ** 2 for r in range(len(b)))
+        ss_tot = sum((v - mean) ** 2 for v in b) or 1e-9
+        r2 = 1 - ss_res / ss_tot
+        fit["r2"] = round(r2, 3)
+        if r2 >= 0.5:
+            # Keep output at list weight (the anchor) and scale the others by
+            # what the meter says they are worth relative to output.
+            K[1] = 1.0
+            K[2] = x[1] / x[0]
+            K[0] = K[2]
+            K[3] = x[2] / x[0]
+            fit["source"] = "fit"
+            fit["K"] = [round(v, 4) for v in K]
+# Model multipliers: ticks done (85%+) on one model, compared with the rest.
+rates = []
+per_model_rates = {k: [] for k in MODELS}
+for dp, x, pm, a, b in usable:
+    tot = sum(pm.values())
+    if tot <= 0:
+        continue
+    u = x[0] * K[1] + x[1] * K[2] + x[2] * K[3]
+    if u <= 0:
+        continue
+    rates.append(dp / u)
+    for k, v in pm.items():
+        if v / tot >= 0.85:
+            per_model_rates[k].append(dp / u)
+
+
+def median(a):
+    a = sorted(a)
+    if not a:
+        return 0.0
+    n = len(a)
+    return a[n // 2] if n % 2 else (a[n // 2 - 1] + a[n // 2]) / 2
+
+
+# A model's own multiplier is used only with 8+ ticks on it whose spread is
+# tight (middle half within 60% of the median); otherwise it stays at list.
+fit["measured"] = {}
+mid = median(rates) if len(rates) >= 15 else 0
+for k in MODELS:
+    rk = sorted(per_model_rates[k])
+    fit["model_ticks"][k] = len(rk)
+    if not rk or mid <= 0:
+        continue
+    m_ = median(rk) / mid
+    q1, q3 = rk[len(rk) // 4] / mid, rk[(3 * len(rk)) // 4] / mid
+    spread = (q3 - q1) / m_ if m_ > 0 else 9
+    fit["measured"][k] = {"x": round(m_, 3), "ticks": len(rk), "spread": round(spread, 2)}
+    if len(rk) >= 8 and spread <= 0.6:
+        MM[k] = m_
+fit["MM"] = {k: round(v, 3) for k, v in MM.items()}
+if any(v != 1.0 for v in MM.values()):
+    fit["source"] = "fit" if fit["source"] == "fit" else "fit-models"
+
+# ---------------------------------------------------------------------------
+# Window totals.
+# ---------------------------------------------------------------------------
+def totals(a, b=None, pred=None):
+    r = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "messages": 0, "units": 0.0, "listUnits": 0.0, "models": {}}
+    for c in CALLS:
+        if c["t"] < a or (b is not None and c["t"] > b) or (pred and not pred(c)):
+            continue
+        r["input"] += c["i"]; r["output"] += c["o"]; r["cache_write"] += c["w"]; r["cache_read"] += c["r"]
+        r["messages"] += 1
+        u = units(c)
+        r["units"] += u
+        r["listUnits"] += list_units(c)
+        mm = r["models"].setdefault(c["model"], {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "units": 0.0})
+        mm["input"] += c["i"]; mm["output"] += c["o"]; mm["cache_write"] += c["w"]; mm["cache_read"] += c["r"]; mm["units"] += u
+    r["units"] = round(r["units"])
+    r["listUnits"] = round(r["listUnits"])
+    for mm in r["models"].values():
+        mm["units"] = round(mm["units"])
+    return r
+
+
+out = {"now": now}
+for s in starts:
+    t = totals(s)
+    t["turns"] = sum(1 for p in all_prompts if p >= s)
+    out[str(int(s))] = t
+
+# ---------------------------------------------------------------------------
+# This session, turn by turn (subagents included).
+# ---------------------------------------------------------------------------
+mine = [c for c in CALLS if c["main"] or c["sub"]]
+main_calls = [c for c in mine if c["main"]]
+base = main_calls[0]["p"] if main_calls else 0  # the context the session started from
+turns = []
+if mine:
+    bounds = prompts + [float("inf")]
+    # calls before the first prompt we know of (a resumed session) join the first turn
+    for idx in range(len(prompts)):
+        a, b = (-float("inf") if idx == 0 else bounds[idx]), bounds[idx + 1]
+        tc = [c for c in mine if a <= c["t"] < b]
+        if not tc:
+            continue
+        mc = [c for c in tc if c["main"]]
+        ctx0 = mc[0]["p"] if mc else 0
+        # A compaction during this turn shrinks the context: history is what was there before
+        hist_tok = max(0, ctx0 - base)
+        u_all = 0.0; u_hist = 0.0; u_extra = 0.0; out_tok = 0; by_model = {}
+        # The same turn priced on every model, two ways: "here" = the turn as it
+        # ran (old conversation included), "fresh" = the turn in a new session
+        # after a hand-off (old conversation gone, the hand-off allowance read).
+        on_here = {k: 0.0 for k in MODELS}
+        on_fresh = {k: 0.0 for k in MODELS}
+        for c in tc:
+            u = units(c)
+            u_all += u
+            out_tok += c["o"]
+            by_model[c["k"]] = by_model.get(c["k"], 0.0) + u
+            fc = c
+            if c["main"]:
+                ww = w(c["k"], c["p"])
+                h = min(hist_tok, c["p"])
+                # history normally comes from the warm cache; past what was
+                # read, it had to be written again (a cold cache)
+                from_read = min(h, c["r"])
+                u_hist += from_read * ww[3] + (h - from_read) * ww[2]
+                u_extra += HANDOFF_EXTRA * ww[3]
+                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=max(0, c["w"] - (h - from_read)),
+                          p=max(0, c["p"] - h + HANDOFF_EXTRA))
+            for k in MODELS:
+                on_here[k] += units(c, k)
+                on_fresh[k] += units(fc, k)
+        model = max(by_model, key=by_model.get) if by_model else ""
+        turns.append({
+            "t": round(prompts[idx]), "u": round(u_all), "h": round(min(u_hist, u_all)),
+            "f": round(max(0.0, u_all - u_hist) + u_extra),
+            "n": len(tc), "subs": sum(1 for c in tc if c["sub"]), "out": out_tok,
+            "ctx": ctx0, "k": model,
+            "on": {k: round(v) for k, v in on_here.items()},
+            "onf": {k: round(v) for k, v in on_fresh.items()},
+        })
+
+# Is the newest turn still running?  The mod knows (busy); the transcript
+# agrees when its newest main reply has not ended the turn yet.
+live = busy or (last_main is not None and last_main.get("stop") not in ("end_turn", "stop_sequence", "max_tokens", "refusal")
+                and turns and last_main["t"] >= turns[-1]["t"])
+if turns:
+    turns[-1]["live"] = bool(live)
+
+# Growth per turn: the context at the start of a turn, minus the one before,
+# skipping turns with an auto-compact in between.  Median of the last 8.
+growth = []
+for a, b in zip(turns, turns[1:]):
+    if any(a["t"] <= ct < b["t"] for ct, _, _ in compactions):
+        continue
+    if a["ctx"] and b["ctx"] and b["ctx"] > a["ctx"]:
+        growth.append(b["ctx"] - a["ctx"])
+grow = median(growth[-8:]) if growth else 0
+
+ses = None
+if main_path or mine:
+    since = since5h or 0
+    win_calls = [c for c in mine if c["t"] >= since]
+    all_on = {k: round(sum(units(c, k) for c in win_calls)) for k in MODELS}
+    t5 = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "messages": 0, "units": 0}
+    for c in win_calls:
+        t5["input"] += c["i"]; t5["output"] += c["o"]; t5["cache_write"] += c["w"]; t5["cache_read"] += c["r"]
+        t5["messages"] += 1
+    t5["units"] = round(sum(units(c) for c in win_calls))
+    hour_all = sum(units(c) for c in CALLS if c["t"] >= now - 3600)
+    hour_me = sum(units(c) for c in mine if c["t"] >= now - 3600)
+    ses = {
+        "since5h": t5, "allOn": all_on, "base": base, "grow": round(grow),
+        "turns": turns[-80:], "turnCount": len(turns),
+        "turnsIn5h": sum(1 for t in turns if t["t"] >= since),
+        "share1h": round(hour_me / hour_all, 4) if hour_all > 0 else None,
+        "hourUnits": round(hour_all),
+        "compactions": len([c for c in compactions if c[2] == "auto"]),
+        "compactionsAll": len(compactions),
+        "lastCompact": compactions[-1][0] if compactions else None,
+        "lastSeen": last_main["t"] if last_main else None,
+        "subagentCalls": sum(1 for c in mine if c["sub"]),
+    }
+out["_session"] = ses
+out["_which"] = "session" if main_path else "none"
+out["_compactAt"] = round(median(auto_pre[-6:])) if auto_pre else None
+out["_fit"] = fit
+out["_weights"] = {k: [round(x, 5) for x in w(k, 0)] for k in MODELS}
+out["_handoff"] = {"extra": HANDOFF_EXTRA, "noteOut": HANDOFF_NOTE_OUT}
+
+# ---------------------------------------------------------------------------
+# Ledger: one record per finished window.  Units come from the transcripts
+# over the whole window; the meter figure is the last reading seen.
+# A tick with almost no local work behind it is "outside use" (claude.ai
+# chat or the phone app's own chats: the meter moved, nothing here did).
+# ---------------------------------------------------------------------------
+def outside(kind, resets_at, per1):
+    lst = sorted([s for s in samples if s.get("kind") == kind and s.get("resetsAt") == resets_at], key=lambda s: s["at"])
+    if per1 <= 0:
+        return 0
+    odd = 0
+    for a, b in zip(lst, lst[1:]):
+        dp = b["pct"] - a["pct"]
+        if dp <= 0:
+            continue
+        u = sum(list_units(c) for c in calls_between(a["at"], b["at"]))
+        if u < 0.25 * per1 * dp:
+            odd += dp
+    return odd
+
+
+new_rows = []
+for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
+    lst = [s for s in samples if s.get("kind") == kind and s.get("resetsAt") == ra]
+    top = max(lst, key=lambda s: s["pct"])
+    tot = totals(st, en)
+    mu = sorted(tot["models"].items(), key=lambda kv: -kv[1]["units"])
+    models = [key_of(m).capitalize() for m, v in mu if tot["units"] and v["units"] / tot["units"] >= 0.1]
+    by_model = {}
+    for m, v in tot["models"].items():
+        bm = by_model.setdefault(key_of(m), [0, 0, 0, 0])
+        for j, f_ in enumerate(("input", "output", "cache_write", "cache_read")):
+            bm[j] += v[f_]
+    # per 1% in list units (the fixed yardstick)
+    per1 = tot["listUnits"] / top["pct"] if top["pct"] > 0 else 0
+    new_rows.append({
+        "kind": kind, "resetsAt": ra, "start": st, "end": en, "pct": top["pct"], "seen": top["at"],
+        "units": tot["listUnits"], "per1": round(per1) if per1 else None,
+        "tokens": [tot["input"], tot["output"], tot["cache_write"], tot["cache_read"]], "byModel": by_model,
+        "models": sorted(set(models), key=models.index), "outside": outside(kind, ra, per1),
+        "weights": "list", "at": now, "readings": len(lst),
+    })
+out["_ledgerNew"] = new_rows
+
+# Limit check: units per 1% in this 5H window against your usual range
+# (finished 5H windows that reached 20%+, so the per-1% figure means something).
+# Compared at the CURRENT weights (fitted per model when there are enough
+# ticks), recomputed from each row's per-model tokens, so a Fable-heavy window
+# and an Opus-heavy one are measured with the same ruler.
+def row_units(r):
+    bm = r.get("byModel")
+    if not bm:
+        return r.get("units") or 0
+    tot = 0.0
+    for k, t in bm.items():
+        ww = w(k if k in LIST else "sonnet", 0)
+        tot += t[0] * ww[0] + t[1] * ww[1] + t[2] * ww[2] + t[3] * ww[3]
+    return tot
+
+
+full = [r for r in ledger + new_rows if r.get("kind") == "five_hour" and (r.get("pct") or 0) >= 20]
+vals = sorted(row_units(r) / r["pct"] for r in full if row_units(r) > 0)
+chk = None
+if starts and since5h:
+    cur = out.get(str(int(since5h)))
+    cur_s = [s for s in samples if s.get("kind") == "five_hour" and abs(win_bounds("five_hour", s.get("resetsAt"))[0] - since5h) < 120]
+    cur_pct = max([s["pct"] for s in cur_s] or [0])
+    per1_now = cur["units"] / cur_pct if cur and cur_pct > 0 else None
+    if vals:
+        q = lambda p: vals[min(len(vals) - 1, max(0, int(round(p * (len(vals) - 1)))))]
+        lo_, hi_ = (q(0.25), q(0.75)) if len(vals) >= 4 else (vals[0], vals[-1])
+    else:
+        lo_ = hi_ = None
+    rs = cur_s[0]["resetsAt"] if cur_s else None
+    chk = {"per1": round(per1_now) if per1_now else None, "pct": cur_pct, "lo": round(lo_) if lo_ else None, "hi": round(hi_) if hi_ else None, "n": len(vals), "weights": fit["source"],
+           "outside": outside("five_hour", rs, (cur["listUnits"] / cur_pct) if cur and cur_pct > 0 else 0) if rs else 0}
+out["_check"] = chk
+if imported is not None:
+    out["_imported"] = imported
+out["_ticks"] = len(samples)
+print(json.dumps(out))
