@@ -56,6 +56,7 @@ export type View = {
   fit?: Fit
   check?: Check | null
   ledgerCount?: number
+  unpriced?: Record<string, number>  // model id -> calls left out: not in the price table
   refreshing?: boolean
   frame?: number
   error?: string

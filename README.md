@@ -37,7 +37,7 @@ Plus:
 
 - A Claude subscription, not an API key. The bars come from the subscription's limit data. Without it the band shows "No limit data yet".
 - Claude Code 2.1.317 or newer (mods need a recent version).
-- Python 3.
+- Python 3 (found as `python3`, `py -3` or `python`).
 - Tested on macOS. It should run on Linux and Windows, but has not been tested there.
 
 ## Install
@@ -65,19 +65,25 @@ Anthropic does not publish how a subscription weighs different models and token 
 - Measured: token counts, replies, cache timing, conversation size, whole-number percents.
 - Estimated (marked `~`): the hundredths, every per-turn and per-model cost, the runway.
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
+- Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed.
 - It only sees Claude Code on the computer it runs on. Chat on claude.ai, other computers and the phone app also move the meter but are not counted (the Limit check can flag them, not measure them).
 
 List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row per model version (Haiku 5.5's long-prompt price is in `LONG`). Update them when prices change.
 
 ## Privacy
 
-It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts (no conversation text) in the mod's own store and in one tick-log file, `~/.claude/plugins/data/manapool/samples.jsonl`. Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are `python3` (the scanner) and, on macOS, `osascript` (the notification fallback).
+It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts, times, model names and message ids (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` if you set it): `samples.jsonl` (the tick log) and `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines). Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
 
 ## Files
 
 - `hooks/register.tsx`: the mod (band, pane, estimates, alerts)
 - `hooks/scan.py`: reads the transcripts, adds up tokens, fits weights, writes the CSV export
 - `types/index.d.ts`: the mod's saved-state contract
+- `tests/test_scan.py`: tests of the scanner on synthetic transcripts. Run `python3 tests/test_scan.py`.
+
+## Thanks
+
+Incremental scanning, cache-lifetime pricing and the Windows fixes came from a friend's review, which pointed to [Gnomonkit](https://github.com/joshualytle/Gnomonkit) for the same ideas.
 
 ## License
 

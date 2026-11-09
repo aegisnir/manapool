@@ -14,7 +14,8 @@ Called by the mod (hooks/register.tsx) with:
           --now=<epoch>         the mod's clock
           --busy=1              a turn is still running (the newest turn is not finished)
           --model=<id>          the model the session is on now (e.g. claude-opus-5-5)
-          --data-dir=<path>     where the tick log lives (samples.jsonl)
+          --plugin=<name>       the mod's name: its data folder is <config>/plugins/data/<name>
+          --data-dir=<path>     or that folder given directly (tests)
           --reading=<kind>|<resetsAt>|<pct>   a meter reading taken just now (one per window)
   stdin: {"samples": [...], "ledger": [...]}  what the mod has saved (may be empty;
          samples here only seed the tick log file the first time)
@@ -33,7 +34,7 @@ does not count like an expensive output token.  1 unit = one Sonnet input
 token at list price.  The weights start at API list prices and switch to
 weights fitted from your own meter ticks once there are enough clean ticks.
 """
-import csv, glob, json, os, re, sys
+import csv, glob, hashlib, json, os, re, sys, time
 
 # File locking: fcntl on macOS and Linux, msvcrt on Windows.
 try:
@@ -48,13 +49,17 @@ except ImportError:
     import msvcrt
 
     def lock(f):
+        # LK_LOCK itself retries for about 10 s; give up after 30 s in all,
+        # so a stuck lock fails the scan (and shows) instead of hanging it.
         f.seek(0)
+        deadline = time.time() + 30
         while True:
             try:
-                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
                 return
             except OSError:
-                continue
+                if time.time() > deadline:
+                    raise
 
     def unlock(f):
         f.seek(0)
@@ -66,8 +71,13 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 starts, session_id, since5h, now, busy, export = [], "", 0.0, 0.0, False, ""
 cur_model, data_dir, readings = "", "", []
+# Claude Code's own folder: ~/.claude, or wherever CLAUDE_CONFIG_DIR points.
+CONFIG = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
 for a in sys.argv[1:]:
-    if a.startswith("--model="):
+    if a.startswith("--plugin="):
+        # the mod's data folder: <config>/plugins/data/<plugin name>
+        data_dir = os.path.join(CONFIG, "plugins", "data", a.split("=", 1)[1].strip())
+    elif a.startswith("--model="):
         cur_model = a.split("=", 1)[1].strip()
     elif a.startswith("--data-dir="):
         data_dir = os.path.expanduser(a.split("=", 1)[1])
@@ -117,8 +127,7 @@ def read_log():
 if SAMPLES_FILE and os.path.exists(SAMPLES_FILE):
     samples = read_log()
 
-HOME = os.path.expanduser("~")
-ROOT = os.path.join(HOME, ".claude", "projects")
+ROOT = os.path.join(CONFIG, "projects")
 SPAN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 
 # ---------------------------------------------------------------------------
@@ -150,6 +159,12 @@ PRICES = {
     ("haiku", "5.5"): (0.10, 0.50, 0.20, 0.01),
     ("haiku", "4.5"): (1, 5, 2, 0.10),
 }
+# Cache writes come in two lifetimes: the 1-hour kind (2x input, the column
+# above) and the 5-minute kind (1.25x input).  Claude Code's main thread uses
+# the 1-hour kind; subagents mostly the 5-minute kind.
+WRITE_5M = 1.25
+# Fast mode (usage.speed == "fast") costs this many times every price.
+FAST = 2.0
 # Priced by prompt length: a call whose prompt (input + cache write + cache
 # read) is over the threshold pays every price times the multiplier.
 LONG = {("haiku", "5.5"): (100_000, 5.0)}
@@ -174,7 +189,9 @@ def key_of(model):
         return "opus"
     if "haiku" in m:
         return "haiku"
-    return "sonnet"
+    if "sonnet" in m:
+        return "sonnet"
+    return ""  # unknown: left unpriced (and listed), never guessed
 
 
 # "claude-opus-5-5" -> "5.5", "claude-haiku-4-5-20251001" -> "4.5",
@@ -190,13 +207,20 @@ def ver_of(model):
     return m.group(1) + ("." + m.group(2) if m.group(2) else "")
 
 
-def price(fam, ver, prompt):
-    """Units per token (input, output, cache write, cache read) for one call."""
+def price(fam, ver, prompt, fast=False):
+    """Units per token for one call: input, output, cache write (1 hour),
+    cache read, cache write (5 minutes)."""
     p = PRICES.get((fam, ver)) or PRICES[(fam, NEWEST[fam])]
     ver = ver if (fam, ver) in PRICES else NEWEST[fam]
     lim = LONG.get((fam, ver))
-    big = lim[1] if lim and prompt > lim[0] else 1.0
-    return [x / UNIT_DOLLARS * big for x in p]
+    big = (lim[1] if lim and prompt > lim[0] else 1.0) * (FAST if fast else 1.0)
+    return [x / UNIT_DOLLARS * big for x in (*p, p[0] * WRITE_5M)]
+
+
+def cost(c, ww):
+    """One call's tokens times a weight vector (from price() or w())."""
+    w5 = c.get("w5", 0)
+    return c["i"] * ww[0] + c["o"] * ww[1] + (c["w"] - w5) * ww[2] + c["r"] * ww[3] + w5 * ww[4]
 
 
 def ts(s):
@@ -214,10 +238,11 @@ MM = {k: 1.0 for k in MODELS}
 DEFAULT = dict(NEWEST)
 
 
-def w(model_key, prompt, ver=None):
-    """Unit weight per token type for one call on model_key (fitted weights)."""
-    base = price(model_key, ver or DEFAULT[model_key], prompt)
-    return [base[i] * K[i] * MM[model_key] for i in range(4)]
+def w(model_key, prompt, ver=None, fast=False):
+    """Unit weight per token type for one call on model_key (fitted weights).
+    Both cache-write kinds take the fitted cache-write factor K[2]."""
+    base = price(model_key, ver or DEFAULT[model_key], prompt, fast)
+    return [base[i] * K[i if i < 4 else 2] * MM[model_key] for i in range(5)]
 
 
 def units(c, model_key=None):
@@ -226,10 +251,10 @@ def units(c, model_key=None):
     last).  Re-pricing applies within a family too: Haiku 4.5 turns forecast
     on Haiku 5.5 at Haiku 5.5's prices."""
     if model_key is None:
-        ww = w(c["k"], c["p"], c["v"])
+        ww = w(c["k"], c["p"], c["v"], c.get("fast", False))
     else:
-        ww = w(model_key, c["p"])
-    return c["i"] * ww[0] + c["o"] * ww[1] + c["w"] * ww[2] + c["r"] * ww[3]
+        ww = w(model_key, c["p"])  # re-priced: at standard speed
+    return cost(c, ww)
 
 
 def is_long(c):
@@ -240,8 +265,7 @@ def is_long(c):
 def list_units(c):
     """The same at plain list prices: the fixed yardstick of the ledger.
     It never changes when the fit does, so old and new rows stay comparable."""
-    L = price(c["k"], c["v"], c["p"])
-    return c["i"] * L[0] + c["o"] * L[1] + c["w"] * L[2] + c["r"] * L[3]
+    return cost(c, price(c["k"], c["v"], c["p"], c.get("fast", False)))
 
 
 # ---------------------------------------------------------------------------
@@ -336,101 +360,187 @@ for s in samples:
 oldest = max(oldest, now - 29 * 86400)
 
 # ---------------------------------------------------------------------------
-# One pass over the transcripts.
+# Read the transcripts, incrementally.
+#
+# Claude Code only ever appends to a transcript.  So for each file the scanner
+# keeps (in scan-cache.json, next to the tick log) what it already pulled out
+# of it, plus its size, modified time, how far it has read (a byte offset) and
+# a fingerprint of its first bytes.  On the next scan an unchanged file is not
+# opened at all, a grown one is read only from the offset, and one that shrank
+# or whose start changed is read again from the beginning.  Only complete
+# lines are consumed, so a line still being written is picked up next time.
+# Without a data folder (tests, --export) it simply reads everything.
 # ---------------------------------------------------------------------------
+CACHE_FILE = os.path.join(data_dir, "scan-cache.json") if data_dir else ""
+CACHE_V = 2   # bump when the record layout below changes: forces a full re-read
+HEAD = 4096   # bytes fingerprinted at the start of each file
+
+
+def head_hash(fh, n):
+    fh.seek(0)
+    return hashlib.sha1(fh.read(n)).hexdigest()
+
+
+def parse(lines):
+    """Pull out only what the scanner needs (never any text):
+    calls:   [time, model id, input, output, cache write, of which 5-minute,
+              cache read, sidechain 0/1, stop reason, message id, fast 0/1]
+    prompts: times of your own messages
+    compact: [time, tokens before, trigger] of each compaction"""
+    rec = {"calls": [], "prompts": [], "compact": []}
+    for line in lines:
+        if '"compact_boundary"' in line:
+            try:
+                d = json.loads(line)
+                if d.get("subtype") == "compact_boundary":
+                    md = d.get("compactMetadata") or {}
+                    rec["compact"].append([ts(d.get("timestamp", "")), md.get("preTokens") or 0, md.get("trigger") or ""])
+            except Exception:
+                pass
+            continue
+        if '"type":"user"' in line and '"tool_result"' not in line:
+            # Your own message (not a tool result, not a system note, not a summary)
+            try:
+                d = json.loads(line)
+                if d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"):
+                    continue
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, str) or (isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "text" for x in c)):
+                    rec["prompts"].append(ts(d.get("timestamp", "")))
+            except Exception:
+                pass
+            continue
+        if '"usage"' not in line or '"assistant"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        m = d.get("message") or {}
+        u = m.get("usage")
+        if d.get("type") != "assistant" or not u or m.get("model") == "<synthetic>":
+            continue
+        cc = u.get("cache_creation") or {}
+        rec["calls"].append([ts(d.get("timestamp", "")), m.get("model") or "?",
+                             u.get("input_tokens", 0) or 0, u.get("output_tokens", 0) or 0,
+                             u.get("cache_creation_input_tokens", 0) or 0, cc.get("ephemeral_5m_input_tokens", 0) or 0,
+                             u.get("cache_read_input_tokens", 0) or 0, 1 if d.get("isSidechain") else 0,
+                             m.get("stop_reason"), m.get("id") or d.get("uuid"), 1 if u.get("speed") == "fast" else 0])
+    return rec
+
+
+cache = {}
+if CACHE_FILE:
+    try:
+        with open(CACHE_FILE) as f:
+            got = json.load(f)
+        if got.get("v") == CACHE_V:
+            cache = got.get("files") or {}
+    except Exception:
+        cache = {}  # missing or damaged: rebuilt by this scan
+dirty = False
+entries = {}  # path -> its records, for every file in range
+for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+    try:
+        st_ = os.stat(path)
+    except OSError:
+        continue
+    e = cache.get(path)
+    if st_.st_mtime < oldest:
+        if e and st_.st_mtime >= now - 31 * 86400:
+            entries[path] = None  # out of range for this scan, but keep its cache
+        continue
+    if e and e["size"] == st_.st_size and e["mtime"] == st_.st_mtime:
+        entries[path] = e
+        continue
+    try:
+        with open(path, "rb") as fh:
+            grown = bool(e) and st_.st_size >= e["off"] and head_hash(fh, e["hlen"]) == e["head"]
+            if not grown:
+                e = {"off": 0, "calls": [], "prompts": [], "compact": []}
+            fh.seek(e["off"])
+            chunk = fh.read()
+            end = chunk.rfind(b"\n") + 1  # complete lines only
+            rec = parse(chunk[:end].decode("utf-8", errors="ignore").splitlines())
+            for k_ in ("calls", "prompts", "compact"):
+                e[k_] = e[k_] + rec[k_]
+            e["off"] += end
+            e["hlen"] = min(HEAD, e["off"])
+            e["head"] = head_hash(fh, e["hlen"])
+            e["size"], e["mtime"] = st_.st_size, st_.st_mtime
+    except OSError:
+        continue
+    entries[path] = e
+    dirty = True
+if CACHE_FILE and (dirty or len(entries) != len(cache)):
+    keep = {pth: (e if e is not None else cache[pth]) for pth, e in entries.items()}
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        tmp = f"{CACHE_FILE}.{os.getpid()}.tmp"  # one per process: parallel scans never share a temp file
+        with open(tmp, "w") as f:
+            # dumps (C encoder) then one write: several times faster than dump(f)
+            f.write(json.dumps({"v": CACHE_V, "files": keep}, separators=(",", ":")))
+        os.replace(tmp, CACHE_FILE)
+    except OSError:
+        pass  # a cache that can't be saved only costs speed
+
+# Merge every file's records into one view for this session.
 calls = {}       # message id -> call (one reply is logged several times while it streams: keep the last copy)
-prompts = []     # your own messages in THIS session: (time, uuid)
+prompts = []     # your own messages in THIS session
 all_prompts = [] # every session's own messages (turn counts per window)
-compactions = [] # this session's auto-compacts: (time, tokens before)
-auto_pre = []    # tokens-before of recent auto-compacts anywhere (the real trigger point)
+compactions = [] # this session's compactions: (time, tokens before, trigger)
+auto = []        # (time, tokens before) of auto-compacts anywhere (the real trigger point)
+unpriced = {}    # model id -> calls: models the price table does not know, left out
 main_path = ""
 sub_dir = f"{os.sep}{session_id}{os.sep}subagents{os.sep}" if session_id else None
 last_main = None  # newest main-thread assistant record in this session
 
-for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
-    try:
-        if os.path.getmtime(path) < oldest:
-            continue
-    except OSError:
+for path, e in entries.items():
+    if e is None:
         continue
     is_main = bool(session_id) and os.path.basename(path) == session_id + ".jsonl"
     is_sub = bool(sub_dir) and sub_dir in path
     if is_main:
         main_path = path
-    try:
-        f = open(path, "r", errors="ignore")
-    except OSError:
-        continue
-    with f:
-        for line in f:
-            if '"compact_boundary"' in line:
-                try:
-                    d = json.loads(line)
-                    if d.get("subtype") == "compact_boundary":
-                        md = d.get("compactMetadata") or {}
-                        t = ts(d.get("timestamp", ""))
-                        if md.get("trigger") == "auto" and md.get("preTokens"):
-                            auto_pre.append(md["preTokens"])
-                        if is_main:
-                            compactions.append((t, md.get("preTokens") or 0, md.get("trigger") or ""))
-                except Exception:
-                    pass
-                continue
-            if '"type":"user"' in line and '"tool_result"' not in line:
-                # Your own message (not a tool result, not a system note, not a summary)
-                try:
-                    d = json.loads(line)
-                    if d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"):
-                        continue
-                    c = (d.get("message") or {}).get("content")
-                    real = isinstance(c, str) or (isinstance(c, list) and any(
-                        isinstance(b, dict) and b.get("type") == "text" for b in c))
-                    if real:
-                        t = ts(d.get("timestamp", ""))
-                        if t >= oldest:
-                            all_prompts.append(t)
-                        if is_main:
-                            prompts.append(t)
-                except Exception:
-                    pass
-                continue
-            if '"usage"' not in line or '"assistant"' not in line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            m = d.get("message") or {}
-            u = m.get("usage")
-            if d.get("type") != "assistant" or not u or m.get("model") == "<synthetic>":
-                continue
-            t = ts(d.get("timestamp", ""))
-            if t < oldest and not is_main:
-                continue
-            i = u.get("input_tokens", 0) or 0
-            w_ = u.get("cache_creation_input_tokens", 0) or 0
-            r = u.get("cache_read_input_tokens", 0) or 0
-            c = {"t": t, "k": key_of(m.get("model")), "v": ver_of(m.get("model")), "model": m.get("model", "?"),
-                 "i": i, "o": u.get("output_tokens", 0) or 0, "w": w_, "r": r, "p": i + w_ + r,
-                 "main": is_main and not d.get("isSidechain"), "sub": bool(is_sub or (is_main and d.get("isSidechain"))),
-                 "stop": m.get("stop_reason")}
-            key = m.get("id") or d.get("uuid")
-            prev = calls.get(key)
-            # The same reply can be logged more than once: while it streams
-            # (keep the newest copy's token counts) and in a forked or resumed
-            # session's transcript (a copy of the parent's history).  Whether
-            # it belongs to THIS session must not depend on which file was read
-            # last, so the flags are combined across every copy.
-            if prev is None or t >= prev["t"]:
-                if prev is not None:
-                    c["main"] = c["main"] or prev["main"]
-                    c["sub"] = c["sub"] or prev["sub"]
-                calls[key] = c
-            else:
-                prev["main"] = prev["main"] or c["main"]
-                prev["sub"] = prev["sub"] or c["sub"]
-            if c["main"] and (last_main is None or t >= last_main["t"]):
-                last_main = c
+    for t, pre, trig in e["compact"]:
+        if trig == "auto" and pre:
+            auto.append((t, pre))
+        if is_main:
+            compactions.append((t, pre, trig))
+    for t in e["prompts"]:
+        if t >= oldest:
+            all_prompts.append(t)
+        if is_main:
+            prompts.append(t)
+    for t, model, i, o, w_, w5, r, side, stop, key, fast in e["calls"]:
+        if t < oldest and not is_main:
+            continue
+        fam = key_of(model)
+        if not fam:
+            unpriced[model] = unpriced.get(model, 0) + 1
+            continue
+        c = {"t": t, "k": fam, "v": ver_of(model), "model": model,
+             "i": i, "o": o, "w": w_, "w5": min(w5, w_), "r": r, "p": i + w_ + r, "fast": bool(fast),
+             "main": is_main and not side, "sub": bool(is_sub or (is_main and side)), "stop": stop}
+        prev = calls.get(key)
+        # The same reply can be logged more than once: while it streams
+        # (keep the newest copy's token counts) and in a forked or resumed
+        # session's transcript (a copy of the parent's history).  Whether
+        # it belongs to THIS session must not depend on which file was read
+        # last, so the flags are combined across every copy.
+        if prev is None or t >= prev["t"]:
+            if prev is not None:
+                c["main"] = c["main"] or prev["main"]
+                c["sub"] = c["sub"] or prev["sub"]
+            calls[key] = c
+        else:
+            prev["main"] = prev["main"] or c["main"]
+            prev["sub"] = prev["sub"] or c["sub"]
+        if c["main"] and (last_main is None or t >= last_main["t"]):
+            last_main = c
+
+compactions.sort()
+auto_pre = [pre for _, pre in sorted(auto)]
 
 CALLS = sorted(calls.values(), key=lambda c: c["t"])
 prompts.sort()
@@ -492,9 +602,9 @@ for ra, lst in by_win.items():
         x = [0.0, 0.0, 0.0]
         per_model = {}
         for c in calls_between(cut(a), cut(b)):
-            L = price(c["k"], c["v"], c["p"])
+            L = price(c["k"], c["v"], c["p"], c.get("fast", False))
             x[0] += c["o"] * L[1]
-            x[1] += c["w"] * L[2] + c["i"] * L[0]
+            x[1] += (c["w"] - c["w5"]) * L[2] + c["w5"] * L[4] + c["i"] * L[0]
             x[2] += c["r"] * L[3]
             per_model[c["k"]] = per_model.get(c["k"], 0.0) + list_units(c)
         ticks.append((dp, x, per_model, a["at"], b["at"]))
@@ -568,20 +678,20 @@ if any(v != 1.0 for v in MM.values()):
 # Window totals.
 # ---------------------------------------------------------------------------
 def totals(a, b=None, pred=None):
-    r = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "messages": 0, "units": 0.0, "listUnits": 0.0, "models": {}}
+    r = {"input": 0, "output": 0, "cache_write": 0, "cache_write_5m": 0, "cache_read": 0, "messages": 0, "units": 0.0, "listUnits": 0.0, "models": {}}
     for c in CALLS:
         if c["t"] < a or (b is not None and c["t"] > b) or (pred and not pred(c)):
             continue
-        r["input"] += c["i"]; r["output"] += c["o"]; r["cache_write"] += c["w"]; r["cache_read"] += c["r"]
+        r["input"] += c["i"]; r["output"] += c["o"]; r["cache_write"] += c["w"]; r["cache_write_5m"] += c["w5"]; r["cache_read"] += c["r"]
         r["messages"] += 1
         u = units(c)
         r["units"] += u
         r["listUnits"] += list_units(c)
         # Calls billed at a long-prompt price are kept apart ("#long"), so the
         # ledger can re-price them at that price later.
-        mm = r["models"].setdefault(c["model"] + ("#long" if is_long(c) else ""),
-                                    {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "units": 0.0})
-        mm["input"] += c["i"]; mm["output"] += c["o"]; mm["cache_write"] += c["w"]; mm["cache_read"] += c["r"]; mm["units"] += u
+        mm = r["models"].setdefault(c["model"] + ("#long" if is_long(c) else "") + ("#fast" if c["fast"] else ""),
+                                    {"input": 0, "output": 0, "cache_write": 0, "cache_write_5m": 0, "cache_read": 0, "units": 0.0})
+        mm["input"] += c["i"]; mm["output"] += c["o"]; mm["cache_write"] += c["w"]; mm["cache_write_5m"] += c["w5"]; mm["cache_read"] += c["r"]; mm["units"] += u
     r["units"] = round(r["units"])
     r["listUnits"] = round(r["listUnits"])
     for mm in r["models"].values():
@@ -631,7 +741,7 @@ if mine:
             fc = c
             wc = c
             if c["main"]:
-                ww = w(c["k"], c["p"], c["v"])
+                ww = w(c["k"], c["p"], c["v"], c["fast"])
                 h = min(hist_tok, c["p"])
                 # history normally comes from the warm cache; past what was
                 # read, it was sent again: as a cache write, or (rarely) as
@@ -648,15 +758,14 @@ if mine:
                 # first turn too, because the next turn re-sends all of it.
                 reuse = min(ctx0, c["p"])
                 rw, ri = split(reuse - min(reuse, c["r"]))
-                wc = dict(c, r=c["r"] + rw + ri, w=c["w"] - rw, i=c["i"] - ri)
+                wc = dict(c, r=c["r"] + rw + ri, w=c["w"] - rw, w5=min(c["w5"], c["w"] - rw), i=c["i"] - ri)
                 # Fresh session: the history is gone, the hand-off allowance read.
-                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=c["w"] - hw, i=c["i"] - hi,
+                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=c["w"] - hw, w5=min(c["w5"], c["w"] - hw), i=c["i"] - hi,
                           p=max(0, c["p"] - h + HANDOFF_EXTRA))
             # The fresh-session price uses the fresh prompt's own length, so a
             # call that drops under a long-prompt threshold (Haiku 5.5 past
             # 100k) is priced at the normal rate.
-            ffw = w(fc["k"], fc["p"], fc["v"])
-            u_fresh += fc["i"] * ffw[0] + fc["o"] * ffw[1] + fc["w"] * ffw[2] + fc["r"] * ffw[3]
+            u_fresh += cost(fc, w(fc["k"], fc["p"], fc["v"], fc["fast"]))
             for k in MODELS:
                 on_here[k] += units(wc, k)
                 on_fresh[k] += units(fc, k)
@@ -759,8 +868,8 @@ for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
     # per exact model id, so the audit can re-price each version on its own
     by_model = {}
     for m, v in tot["models"].items():
-        bm = by_model.setdefault(m, [0, 0, 0, 0])
-        for j, f_ in enumerate(("input", "output", "cache_write", "cache_read")):
+        bm = by_model.setdefault(m, [0, 0, 0, 0, 0])
+        for j, f_ in enumerate(("input", "output", "cache_write", "cache_read", "cache_write_5m")):
             bm[j] += v[f_]
     # per 1% in list units (the fixed yardstick)
     per1 = tot["listUnits"] / top["pct"] if top["pct"] > 0 else 0
@@ -786,8 +895,12 @@ def row_units(r):
     # keys are model ids, "#long" for calls billed at a long-prompt price
     # (older rows: family names, priced on that family's usual version)
     for m, t in bm.items():
-        ww = w(key_of(m), float("inf") if m.endswith("#long") else 0, ver_of(m) or None)
-        tot += t[0] * ww[0] + t[1] * ww[1] + t[2] * ww[2] + t[3] * ww[3]
+        fam = key_of(m)
+        if not fam:
+            continue
+        # [input, output, cache write, cache read, of the writes 5-minute] (older rows: 4 numbers)
+        ww = w(fam, float("inf") if "#long" in m else 0, ver_of(m) or None, "#fast" in m)
+        tot += cost({"i": t[0], "o": t[1], "w": t[2], "r": t[3], "w5": t[4] if len(t) > 4 else 0}, ww)
     return tot
 
 
@@ -864,5 +977,6 @@ if SAMPLES_FILE:
             unlock(lk)
     out["_samples"] = samples
 
+out["_unpriced"] = unpriced  # model id -> calls left out (not in the price table)
 out["_ticks"] = len(samples)
 print(json.dumps(out))

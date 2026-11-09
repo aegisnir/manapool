@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.6' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.7' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -384,11 +384,14 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## How accurate is it?', '')
   L.push('- **Measured:** token counts, calls, turns, subagents, context size, cache timing, auto-compacts, the whole-number percents.')
   L.push('- **Estimated:** the hundredths, the pace and runway, every % of a turn or a switch (they rest on the rate and the weights), the new-session price (it assumes the hand-off allowance).')
+  L.push('- **Prices:** each call at its exact model version; cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x input); fast mode 2x; Haiku 5.5 prompts over 100k at its higher tier.')
+  const unp = Object.entries(v?.unpriced ?? {})
+  if (unp.length) L.push(`- **Not priced:** ${unp.map(([m, n]) => `${m} (${n} calls)`).join(', ')}. Not in the price table, so left out of every figure.`)
   L.push('- **Blind spot:** claude.ai chat and the phone app\'s own chats move the meter but are invisible here.', '')
 
   L.push('## Where things live', '')
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
-  L.push('- **Keeps**: the tick log in `~/.claude/plugins/data/<plugin>/samples.jsonl` (one shared file, written under a lock); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts only, no conversation text.')
+  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock) and `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts only, no conversation text.')
   L.push('- **Refreshes:** about 1.5 seconds after each of your turns and each meter tick, every 2 minutes otherwise; the cache clock redraws every 30 seconds.')
   L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
   return L.join('\n')
@@ -441,6 +444,10 @@ export const register: Register = on => {
   let compactAtRead = 0
   let pruned = 0          // when old per-session entries were last cleared out
   let version = ''        // from plugin.json, shown after the title
+  // The Python 3 command that works here, found once.  On Windows `python3`
+  // is often missing or the Microsoft Store stub, so `py -3` and `python`
+  // are tried next; each must print "3" for Python's major version.
+  let py: string[] | undefined
   let alerts: AlertState | undefined
 
   // Refresh soon after an event, once the transcript is on disk (it lags a
@@ -632,6 +639,7 @@ export const register: Register = on => {
         compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
         session: sums._session ?? undefined, weights: sums._weights, long: sums._long, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
+        unpriced: sums._unpriced,
       }
       await io.show(() => nv)
       // So the next session (and this one after a reload) can draw at once.
@@ -662,7 +670,19 @@ export const register: Register = on => {
       usageBreak: () => $.session.usage({ breakdown: 'summary' }),
       model: () => $.session.model(),
       now: () => $.clock.now(),
-      scan: (args, stdin) => $.process.run(['python3', `${$.plugin.root}/hooks/scan.py`, `--data-dir=~/.claude/plugins/data/${$.plugin.name}`, ...args], { stdin, timeoutMs: 120000 }),
+      scan: async (args, stdin) => {
+        if (!py) {
+          for (const cand of [['python3'], ['py', '-3'], ['python']]) {
+            try {
+              const r = await $.process.run([...cand, '-c', 'import sys; print(sys.version_info[0])'], { timeoutMs: 15000 })
+              if (r.exitCode === 0 && r.stdout.trim() === '3') { py = cand; break }
+            } catch { /* not installed: try the next */ }
+          }
+          if (!py) throw new Error('Python 3 not found (tried python3, py -3, python).')
+        }
+        // --plugin: scan.py keeps its files in <Claude config>/plugins/data/<name>
+        return $.process.run([...py, `${$.plugin.root}/hooks/scan.py`, `--plugin=${$.plugin.name}`, ...args], { stdin, timeoutMs: 120000 })
+      },
       get: k => $.store.get(k),
       set: (k, val) => $.store.set(k, val as any),
       keys: () => $.store.keys(),
@@ -716,7 +736,8 @@ export const register: Register = on => {
     if (arg === 'export') {
       const ledger = ((await $.store.get('ledger')) ?? []) as LedgerRow[]
       // scan.py expands the ~ and writes the file (local only)
-      const r = await $.process.run(['python3', `${$.plugin.root}/hooks/scan.py`, '--export=~/Documents/Mana Pool/manapool-ledger.csv'], { stdin: JSON.stringify({ ledger }), timeoutMs: 60000 })
+      if (!ioRef) return { text: 'Not ready yet. Send a message first.' }
+      const r = await ioRef.scan(['--export=~/Documents/Mana Pool/manapool-ledger.csv'], JSON.stringify({ ledger }))
       if (r.exitCode !== 0) return { text: `Export failed: ${r.stderr.slice(-300)}` }
       let path = '~/Documents/Mana Pool/manapool-ledger.csv'
       try { path = JSON.parse(r.stdout).exported ?? path } catch { /* keep the short form */ }
