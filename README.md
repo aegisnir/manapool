@@ -80,6 +80,7 @@ It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token co
 - `hooks/scan.py`: reads the transcripts, adds up tokens, fits weights, writes the CSV export
 - `types/index.d.ts`: the mod's saved-state contract
 - `tests/test_scan.py`: tests of the scanner on synthetic transcripts. Run `python3 tests/test_scan.py`.
+- `CHANGELOG.md`: what changed in each version
 
 ## Thanks
 
