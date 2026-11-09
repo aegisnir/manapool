@@ -33,6 +33,13 @@ Plus:
 - `/manapool test-notify` sends a test notification.
 - A toast when a warning gets worse, and a system notification when the 5-hour limit will run out within about 30 minutes (once per window). On macOS it falls back to a native notification when Claude Code's own cannot be shown.
 
+## Requirements
+
+- A Claude subscription, not an API key. The bars come from the subscription's limit data. Without it the band shows "No limit data yet".
+- Claude Code 2.1.317 or newer (mods need a recent version).
+- Python 3.
+- Tested on macOS. It should run on Linux and Windows, but has not been tested there.
+
 ## Install
 
 At the prompt of a terminal session:
@@ -49,7 +56,7 @@ claude plugin install manapool --marketplace aegisnir/manapool
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `aegisnir/manapool`, then **Add plugin**.
 
-Needs Python 3 on your computer (the transcript scanner is a small local script).
+To update: `/plugin update manapool`. To remove: `/plugin uninstall manapool`, then delete `~/.claude/plugins/data/manapool/` if you also want its tick log gone.
 
 ## How the estimates work, and what is a guess
 
