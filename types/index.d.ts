@@ -51,6 +51,7 @@ export type View = {
   rate?: number           // % of the 5H limit per work unit
   session?: Session
   weights?: Record<string, number[]>  // units per token: input, output, cache write, cache read
+  long?: Record<string, { over: number; w: number[] }>  // long-prompt tier: past `over` tokens, weights `w`
   handoff?: { extra: number; noteOut: number }
   fit?: Fit
   check?: Check | null

@@ -299,6 +299,14 @@ if imported is not None:
     imported = samples  # hand back the cleaned copy
 
 
+def cut(s):
+    """The moment a reading covers work up to.  Readings saved before
+    2026-11-09 were rounded down to the whole second, so a reply in that same
+    second may be missing: for those, count to the end of the second."""
+    at = s.get("at", 0)
+    return at + 1 if float(at).is_integer() else at
+
+
 def win_bounds(kind, resets_at):
     end = ts(resets_at) if resets_at else 0
     return (end - SPAN[kind], end) if end else (0, 0)
@@ -311,7 +319,15 @@ def win_bounds(kind, resets_at):
 # transcripts and readings are still on disk, and left out of the limit check
 # otherwise.
 RULE = 2
-done = {(r.get("kind"), r.get("resetsAt")) for r in ledger if (r.get("rule") or 0) >= RULE}
+# A row is also redone when the log holds a higher reading for its window
+# than the row used (a session saved its reading after another session had
+# already closed the window).
+top_pct = {}
+for s in samples:
+    k = (s.get("kind"), s.get("resetsAt"))
+    top_pct[k] = max(top_pct.get(k, -1), s.get("pct", -1))
+done = {(r.get("kind"), r.get("resetsAt")) for r in ledger
+        if (r.get("rule") or 0) >= RULE and (r.get("pct") or 0) >= top_pct.get((r.get("kind"), r.get("resetsAt")), -1)}
 closing = {}
 for s in samples:
     k = (s.get("kind"), s.get("resetsAt"))
@@ -494,7 +510,7 @@ for ra, lst in by_win.items():
             continue
         x = [0.0, 0.0, 0.0]
         per_model = {}
-        for c in calls_between(a["at"], b["at"]):
+        for c in calls_between(cut(a), cut(b)):
             L = price(c["k"], c["v"], c["p"])
             x[0] += c["o"] * L[1]
             x[1] += c["w"] * L[2] + c["i"] * L[0]
@@ -637,12 +653,23 @@ if mine:
                 ww = w(c["k"], c["p"], c["v"])
                 h = min(hist_tok, c["p"])
                 # history normally comes from the warm cache; past what was
-                # read, it had to be written again (a cold cache)
+                # read, it was sent again: as a cache write, or (rarely) as
+                # plain input.  `split` says how much of a resent part came
+                # from each, so tokens are moved, never invented or lost.
+                def split(n):
+                    from_w = min(n, c["w"])
+                    return from_w, min(n - from_w, c["i"])
                 from_read = min(h, c["r"])
-                cold = h - from_read
-                u_hist += from_read * ww[3] + cold * ww[2]
-                wc = dict(c, r=c["r"] + cold, w=max(0, c["w"] - cold))
-                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=max(0, c["w"] - cold),
+                hw, hi = split(h - from_read)
+                u_hist += from_read * ww[3] + hw * ww[2] + hi * ww[0]
+                # Warm baseline: everything this call re-sent from earlier turns
+                # (the session's start included) counts as a cache read.  On the
+                # session's first turn nothing was cached before.
+                reuse = min(ctx0, c["p"]) if idx > 0 else h
+                rw, ri = split(reuse - min(reuse, c["r"]))
+                wc = dict(c, r=c["r"] + rw + ri, w=c["w"] - rw, i=c["i"] - ri)
+                # Fresh session: the history is gone, the hand-off allowance read.
+                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=c["w"] - hw, i=c["i"] - hi,
                           p=max(0, c["p"] - h + HANDOFF_EXTRA))
             # The fresh-session price uses the fresh prompt's own length, so a
             # call that drops under a long-prompt threshold (Haiku 5.5 past
@@ -711,6 +738,11 @@ out["_which"] = "session" if main_path else "none"
 out["_compactAt"] = round(median(auto_pre[-6:])) if auto_pre else None
 out["_fit"] = fit
 out["_weights"] = {k: [round(x, 5) for x in w(k, 0)] for k in MODELS}
+# Long-prompt tier per family (current version): the threshold and the weights
+# past it, so the mod prices a reload or a model switch at the context's real
+# length (a 200k-token Haiku 5.5 reload pays 5x).
+out["_long"] = {k: {"over": LONG[(k, DEFAULT[k])][0], "w": [round(x, 5) for x in w(k, float("inf"))]}
+                for k in MODELS if (k, DEFAULT[k]) in LONG}
 out["_handoff"] = {"extra": HANDOFF_EXTRA, "noteOut": HANDOFF_NOTE_OUT}
 
 # ---------------------------------------------------------------------------
@@ -730,7 +762,7 @@ def outside(kind, resets_at, per1):
         dp = b["pct"] - a["pct"]
         if dp <= 0:
             continue
-        u = sum(list_units(c) for c in calls_between(a["at"], b["at"]))
+        u = sum(list_units(c) for c in calls_between(cut(a), cut(b)))
         if u < 0.25 * per1 * dp:
             odd += dp
     return odd
@@ -740,7 +772,7 @@ new_rows = []
 for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
     lst = [s for s in samples if s.get("kind") == kind and s.get("resetsAt") == ra]
     top = max(lst, key=lambda s: s["pct"])
-    tot = totals(st, min(en, top["at"]))
+    tot = totals(st, min(en, cut(top)))
     mu = sorted(tot["models"].items(), key=lambda kv: -kv[1]["units"])
     models = [key_of(m).capitalize() for m, v in mu if tot["units"] and v["units"] / tot["units"] >= 0.1]
     # per exact model id, so the audit can re-price each version on its own
@@ -789,7 +821,7 @@ if starts and since5h:
     cur_pct = max([s["pct"] for s in cur_s] or [0])
     # Count work only up to the newest reading, the same rule as the ledger:
     # anything after it has not shown on the meter yet.
-    cur_at = max([s["at"] for s in cur_s if s["pct"] == cur_pct] or [now])
+    cur_at = max([cut(s) for s in cur_s if s["pct"] == cur_pct] or [now])
     cur = totals(since5h, cur_at) if cur_s else cur
     per1_now = cur["units"] / cur_pct if cur and cur_pct > 0 else None
     if vals:

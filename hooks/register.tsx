@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.2' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.3' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -121,6 +121,12 @@ const derive = (v: View, last: number | null, now: number) => {
   const w7 = v.wins.find(w => w.kind === 'seven_day')
   const ses: Session | undefined = v.session
   const W = v.weights ?? LISTW
+  // Weights for a call whose prompt is `prompt` tokens long: past a model's
+  // long-prompt threshold (Haiku 5.5 over 100k) its higher tier applies.
+  const wAt = (k: string, prompt: number) => {
+    const lg = v.long?.[k]
+    return lg && prompt > lg.over ? lg.w : (W[k] ?? LISTW[k])
+  }
   const rate = v.rate ?? 0
   const ok = rate > 0
   const pc = (u: number) => u * rate // work units -> % of the 5H limit
@@ -129,7 +135,6 @@ const derive = (v: View, last: number | null, now: number) => {
   const lt = done[done.length - 1]
   // your model: the one Claude Code reports, else the one the last turn ran on
   const me = keyOf(v.model ?? '') || lt?.k || 'sonnet'
-  const wm = W[me] ?? LISTW[me]
 
   // --- the meters: hundredths, pace, runway ---
   // The meter moves in whole points.  The hundredths estimate how far toward
@@ -185,7 +190,8 @@ const derive = (v: View, last: number | null, now: number) => {
   const warm = idle !== null && idle < TTL_MS && !otherModel
   const ctxTok = v.ctx?.tokens ?? lt?.ctx ?? 0
   // When the prompt cache is cold, the conversation is written to cache again instead of read.
-  const reloadU = ctxTok * (wm[2] - wm[3])
+  const wCtx = wAt(me, ctxTok)
+  const reloadU = ctxTok * (wCtx[2] - wCtx[3])
 
   // --- Cost pill: token overhead, break-even and the cache clock ---
   const base = ses?.base ?? 0
@@ -196,7 +202,7 @@ const derive = (v: View, last: number | null, now: number) => {
   const save = recent.length ? median(recent.map(t => t.u - t.f)) : 0
   // a hand-off costs once: writing the note here, then the new session storing
   // its starting context (system prompt, tools, note, a few files) in its cache
-  const oneTimeU = ho.noteOut * wm[1] + (base + ho.extra) * wm[2]
+  const oneTimeU = ho.noteOut * wCtx[1] + (base + ho.extra) * wAt(me, base + ho.extra)[2]
   const payback = save > 0 ? oneTimeU / save : Infinity
   const histShare = lt && lt.u > 0 ? lt.h / lt.u : 0
   const turnsTxt = (n: number) => (n === Infinity ? 'no savings yet' : n < 1 ? 'pays back in under a turn' : `pays back in ~${Math.round(n)} turn${Math.round(n) === 1 ? '' : 's'}`)
@@ -245,10 +251,9 @@ const derive = (v: View, last: number | null, now: number) => {
   // The cheaper path is the one with the lower cost over the next 5 turns.
   const HORIZON_TURNS = 5
   const switchRows = MODELS.filter(k => k !== me).map(k => {
-    const wk = W[k] ?? LISTW[k]
-    const nowOnce = pc(ctxTok * wk[2])
+    const nowOnce = pc(ctxTok * wAt(k, ctxTok)[2])
     const nowTurn = perTurn(k, false)
-    const hoOnce = pc(ho.noteOut * wm[1] + (base + ho.extra) * wk[2])
+    const hoOnce = pc(ho.noteOut * wCtx[1] + (base + ho.extra) * wAt(k, base + ho.extra)[2])
     const hoTurn = perTurn(k, true)
     const nowTotal = nowOnce + HORIZON_TURNS * nowTurn
     const hoTotal = hoOnce + HORIZON_TURNS * hoTurn
@@ -624,7 +629,7 @@ export const register: Register = on => {
         wins, samples, updatedAt: now, ctx, model, rate,
         // auto-compact switched off: no trigger point, so no "auto-compact in N turns"
         compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
-        session: sums._session ?? undefined, weights: sums._weights, handoff: sums._handoff,
+        session: sums._session ?? undefined, weights: sums._weights, long: sums._long, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
       }
       await io.show(() => nv)
