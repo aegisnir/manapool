@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.1' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.2' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -28,7 +28,6 @@ const LISTW: Record<string, number[]> = {
 // long unused.  The whole store is capped at 4 MiB by Claude Code.
 const KEEP_SESSION_MS = 7 * 86400e3
 const MAX_SESSIONS = 40
-const MAX_SAMPLES = 3000
 const MAX_LEDGER = 3000
 // A runway shorter than this raises one system notification per 5H window.
 const WALL_MS = 30 * 60 * 1000
@@ -52,6 +51,11 @@ const cap = (k: string) => k.charAt(0).toUpperCase() + k.slice(1)
 const keyOf = (id: string) => {
   const m = (id || '').toLowerCase()
   return m.includes('fable') || m.includes('mythos') ? 'fable' : m.includes('opus') ? 'opus' : m.includes('haiku') ? 'haiku' : m.includes('sonnet') ? 'sonnet' : ''
+}
+// "claude-haiku-4-5-20251001" -> "4.5" (same rule as scan.py's ver_of)
+const verOf = (id: string) => {
+  const m = /(?:fable|mythos|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/.exec((id || '').toLowerCase())
+  return m ? m[1] + (m[2] ? `.${m[2]}` : '') : ''
 }
 const median = (a: number[]) => {
   if (a.length === 0) return 0
@@ -173,8 +177,11 @@ const derive = (v: View, last: number | null, now: number) => {
   // A prompt cache belongs to one model.  After a switch to another model the
   // conversation is not cached for it, however recent the last reply was.
   const idle = last ? now - last : null
-  const cacheModel = ses?.lastModel ?? me
-  const otherModel = idle !== null && cacheModel !== me
+  // Compared by family and version ("haiku-5.5"); by family alone when either
+  // side names no version.
+  const curId = me + (verOf(v.model ?? '') ? `-${verOf(v.model ?? '')}` : '')
+  const cacheId = ses?.lastModel ?? curId
+  const otherModel = idle !== null && (cacheId.includes('-') && curId.includes('-') ? cacheId !== curId : cacheId.split('-')[0] !== me)
   const warm = idle !== null && idle < TTL_MS && !otherModel
   const ctxTok = v.ctx?.tokens ?? lt?.ctx ?? 0
   // When the prompt cache is cold, the conversation is written to cache again instead of read.
@@ -376,7 +383,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
 
   L.push('## Where things live', '')
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
-  L.push('- **Keeps** (the mod\'s store): the tick log, the ledger, the last numbers for an instant start, and each session\'s alert state. Token counts only, no conversation text.')
+  L.push('- **Keeps**: the tick log in `~/.claude/plugins/data/<plugin>/samples.jsonl` (one shared file, written under a lock); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts only, no conversation text.')
   L.push('- **Refreshes:** about 1.5 seconds after each of your turns and each meter tick, every 2 minutes otherwise; the cache clock redraws every 30 seconds.')
   L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
   return L.join('\n')
@@ -507,6 +514,32 @@ export const register: Register = on => {
     }
   }
 
+  // Drop saved entries of sessions not seen for a week (and all but the
+  // newest 40), so the store stays well under its 4 MiB cap.  Runs BEFORE a
+  // refresh writes anything (a nearly full store would otherwise refuse the
+  // write and never get here), and again whenever a write is refused.
+  const prune = async (io: IO, nowMs: number) => {
+    try {
+      const keys = await io.keys()
+      const ses: { id: string; at: number }[] = []
+      for (const k of keys.filter(k => k.startsWith('ses:'))) {
+        const e = (await io.get(k)) as { at?: number } | undefined
+        ses.push({ id: k.slice(4), at: e?.at ?? 0 })
+      }
+      ses.sort((a, b) => b.at - a.at)
+      const keep = new Set(ses.filter((e, i) => i < MAX_SESSIONS && e.at * 1000 >= nowMs - KEEP_SESSION_MS).map(e => e.id))
+      if (sid) keep.add(sid)
+      for (const k of keys) {
+        const m = /^(ses|alerts):(.+)$/.exec(k)
+        if (m && !keep.has(m[2])) await io.del(k)
+      }
+    } catch { /* pruning is best effort */ }
+  }
+  // A store write that is refused (store full) prunes and tries once more.
+  const save = async (io: IO, k: string, val: unknown, nowMs: number) => {
+    try { await io.set(k, val) } catch { await prune(io, nowMs); await io.set(k, val) }
+  }
+
   // Reads local files and runs a script: zero tokens, no model call.
   const refresh = async (io: IO) => {
     // One at a time.  A request that arrives mid-scan (a reply landing while
@@ -526,6 +559,7 @@ export const register: Register = on => {
       const ctx = usage.context?.tokens ? { tokens: usage.context.tokens as number, window: (usage.context.window as number) || 0, percent: usage.context.percent as number | undefined } : undefined
       const nowMs = await io.now()
       const now = Math.floor(nowMs / 1000)
+      if (nowMs - pruned > 3600e3) { pruned = nowMs; await prune(io, nowMs) }
       // Claude Code's own auto-compact trigger, re-read every 10 minutes
       // (a local estimate: it sends nothing).
       if (nowMs - compactAtRead > 600000) {
@@ -543,53 +577,49 @@ export const register: Register = on => {
       }
       const starts = limits.map(r => (r.resetsAt ? Math.floor(Date.parse(r.resetsAt) / 1000) - SPAN[r.kind] : now - SPAN[r.kind]))
       const i5 = limits.findIndex(r => r.kind === 'five_hour')
-      let samples = clean(((await io.get('samples')) ?? []) as Sample[])
+      // The tick log ("at X% the window held Y units", shared by every open
+      // session) lives in a file that scan.py changes only under a file lock,
+      // so parallel sessions never overwrite each other's readings.  The
+      // store's old copy only seeds that file once, then is removed.
+      const oldSamples = ((await io.get('samples').catch(() => undefined)) ?? []) as Sample[]
       let ledger = ((await io.get('ledger')) ?? []) as LedgerRow[]
       const args = [
         ...starts.map(String),
         ...(i5 >= 0 ? [`--since5h=${starts[i5]}`] : []),
         ...(sid ? [`--session-id=${sid}`] : []),
-        `--now=${now}`,
+        ...(model ? [`--model=${model}`] : []),
+        ...limits.map(r => `--reading=${r.kind}|${r.resetsAt ?? ''}|${r.percentUsed}`),
+        `--now=${nowMs / 1000}`, // to the fraction of a second: see scan.py
         `--busy=${turnRunning ? 1 : 0}`,
       ]
-      const run = await io.scan(args, JSON.stringify({ samples, ledger }))
+      const run = await io.scan(args, JSON.stringify({ samples: oldSamples, ledger }))
       if (run.exitCode !== 0) throw new Error(run.stderr.slice(-300))
       const sums = JSON.parse(run.stdout)
-      // Every open session shares the tick log and the ledger, and a scan takes
-      // a second or two.  Another session may have saved newer readings
-      // meanwhile, so read both again right before writing and merge, instead
-      // of overwriting them with this session's older copy.
+      const samples = clean((sums._samples ?? oldSamples) as Sample[])
+      if (sums._samplesFile && oldSamples.length) await io.del('samples').catch(() => undefined)
+      // The ledger stays in the store.  Its rows are rebuilt from transcripts,
+      // so a row lost to a parallel write comes back on the next scan.
+      // Rebuilt rows (made with an older rule) replace the old ones.
       if (Array.isArray(sums._ledgerNew) && sums._ledgerNew.length) {
         ledger = ((await io.get('ledger')) ?? []) as LedgerRow[]
-        const have = new Set(ledger.map(r => `${r.kind}|${r.resetsAt}`))
-        const add = (sums._ledgerNew as LedgerRow[]).filter(r => !have.has(`${r.kind}|${r.resetsAt}`))
-        if (add.length) {
-          ledger = [...ledger, ...add].slice(-MAX_LEDGER) // kept for years: 3000 windows
-          await io.set('ledger', ledger)
-        }
+        const fresh = new Map((sums._ledgerNew as LedgerRow[]).map(r => [`${r.kind}|${r.resetsAt}`, r]))
+        ledger = [...ledger.filter(r => !fresh.has(`${r.kind}|${r.resetsAt}`)), ...fresh.values()].slice(-MAX_LEDGER)
+        await save(io, 'ledger', ledger, nowMs)
       }
-      const wins: Win[] = limits.map((r, i) => ({ kind: r.kind, pct: r.percentUsed, resetsAt: r.resetsAt, tokens: sums[String(starts[i])] }))
-      // The tick log: "at X% the window held Y units", kept across sessions.
-      samples = clean([...(((await io.get('samples')) ?? []) as Sample[]), ...samples])
-      for (const w of wins) {
-        const prev = [...samples].reverse().find(s => s.kind === w.kind && s.resetsAt === w.resetsAt)
-        if (!prev || w.pct > prev.pct) {
-          const models: Record<string, number[]> = {}
-          for (const [id, t] of Object.entries(w.tokens.models ?? {})) models[id] = [t.input, t.output, t.cache_write, t.cache_read]
-          const t = w.tokens
-          samples.push({ at: now, kind: w.kind, pct: w.pct, lu: t.listUnits, fresh: t.input + t.output + t.cache_write, resetsAt: w.resetsAt, mix: [t.input, t.output, t.cache_write, t.cache_read], models })
-        }
-      }
-      // Older than 30 days is no use: the transcripts behind it are gone.
-      samples = samples.filter(s => s.at >= now - 30 * 86400).slice(-MAX_SAMPLES)
-      await io.set('samples', samples)
+      // A session can report a stale percent (the meter moved in another
+      // session it has not heard of yet).  Use the highest reading any session
+      // has logged for the same window.
+      const wins: Win[] = limits.map((r, i) => {
+        const seen = samples.filter(s => s.kind === r.kind && s.resetsAt === r.resetsAt).reduce((m, s) => Math.max(m, s.pct), -1)
+        return { kind: r.kind, pct: Math.max(r.percentUsed, seen), resetsAt: r.resetsAt, tokens: sums[String(starts[i])] }
+      })
       // % of the 5H limit per work unit: trusted from 3% into the window,
       // carried over from the last window before that.
       const w5 = wins.find(w => w.kind === 'five_hour')
       const saved = (await io.get('rate').catch(() => undefined)) as number | undefined
       const fresh5 = w5 && w5.pct >= 3 && w5.tokens.units > 0 ? w5.pct / w5.tokens.units : undefined
       const rate = fresh5 ?? saved
-      if (fresh5) await io.set('rate', fresh5)
+      if (fresh5) await save(io, 'rate', fresh5, nowMs)
       const nv: View = {
         wins, samples, updatedAt: now, ctx, model, rate,
         // auto-compact switched off: no trigger point, so no "auto-compact in N turns"
@@ -599,29 +629,10 @@ export const register: Register = on => {
       }
       await io.show(() => nv)
       // So the next session (and this one after a reload) can draw at once.
-      await io.set('last', { ...nv, samples: [], session: undefined })
-      if (sid) await io.set(`ses:${sid}`, { session: nv.session, at: now })
+      const curSamples = samples.filter(s => wins.some(w => w.kind === s.kind && w.resetsAt === s.resetsAt))
+      await save(io, 'last', { ...nv, samples: curSamples, session: undefined }, nowMs)
+      if (sid) await save(io, `ses:${sid}`, { session: nv.session, at: now }, nowMs)
       await runAlerts(io, nv, nowMs)
-      // Once an hour, drop saved entries of sessions not seen for a week (and
-      // all but the newest 40), so the store stays well under its 4 MiB cap.
-      if (nowMs - pruned > 3600e3) {
-        pruned = nowMs
-        try {
-          const keys = await io.keys()
-          const ses: { id: string; at: number }[] = []
-          for (const k of keys.filter(k => k.startsWith('ses:'))) {
-            const e = (await io.get(k)) as { at?: number } | undefined
-            ses.push({ id: k.slice(4), at: e?.at ?? 0 })
-          }
-          ses.sort((a, b) => b.at - a.at)
-          const keep = new Set(ses.filter((e, i) => i < MAX_SESSIONS && e.at * 1000 >= nowMs - KEEP_SESSION_MS).map(e => e.id))
-          if (sid) keep.add(sid)
-          for (const k of keys) {
-            const m = /^(ses|alerts):(.+)$/.exec(k)
-            if (m && !keep.has(m[2])) await io.del(k)
-          }
-        } catch { /* pruning is best effort */ }
-      }
     } catch (err) {
       await io.show(v => ({ ...(v ?? { wins: [], samples: [], updatedAt: 0 }), refreshing: false, error: String(err) } as View))
     } finally {
@@ -643,7 +654,7 @@ export const register: Register = on => {
       usageBreak: () => $.session.usage({ breakdown: 'summary' }),
       model: () => $.session.model(),
       now: () => $.clock.now(),
-      scan: (args, stdin) => $.process.run(['python3', `${$.plugin.root}/hooks/scan.py`, ...args], { stdin, timeoutMs: 120000 }),
+      scan: (args, stdin) => $.process.run(['python3', `${$.plugin.root}/hooks/scan.py`, `--data-dir=~/.claude/plugins/data/${$.plugin.name}`, ...args], { stdin, timeoutMs: 120000 }),
       get: k => $.store.get(k),
       set: (k, val) => $.store.set(k, val as any),
       keys: () => $.store.keys(),
@@ -681,7 +692,7 @@ export const register: Register = on => {
     try {
       const last = (await $.store.get('last')) as View | undefined
       const mine = sid ? ((await $.store.get(`ses:${sid}`)) as { session?: Session } | undefined) : undefined
-      const samples = clean(((await $.store.get('samples')) ?? []) as Sample[])
+      const samples = clean((last?.samples?.length ? last.samples : ((await $.store.get('samples')) ?? [])) as Sample[])
       await update($, view, () => (last && last.wins?.length
         ? { ...last, samples, session: mine?.session, refreshing: true }
         : { wins: [], samples, updatedAt: 0, refreshing: true }) as any)
