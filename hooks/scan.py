@@ -24,7 +24,7 @@ does not count like an expensive output token.  1 unit = one Sonnet input
 token at list price.  The weights start at API list prices and switch to
 weights fitted from your own meter ticks once there are enough clean ticks.
 """
-import csv, glob, json, os, sys
+import csv, glob, json, os, re, sys
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -59,16 +59,41 @@ ROOT = os.path.join(HOME, ".claude", "projects")
 SPAN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 
 # ---------------------------------------------------------------------------
-# Weights.  List prices in $ per million tokens, divided by Sonnet's input
-# price ($2), so 1 unit = 1 Sonnet input token.  Order: input, output,
-# cache write (1-hour kind, 2x input), cache read.
+# Weights.  List prices per model VERSION in $ per million tokens: input,
+# output, cache write (1-hour kind), cache read.  Source: Anthropic's pricing
+# page, platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-09).
+# Versions of one family can differ a lot (Fable 5.2 is 20% cheaper than 5.1,
+# Sonnet 5.5 reads cache at half Sonnet 5's price), so each call is priced on
+# the exact version it ran on.
+# Units: dollars divided by $2 (Sonnet 5.5 input), so 1 unit = 1 Sonnet input token.
 # ---------------------------------------------------------------------------
-LIST = {
-    "fable":  (5.0, 25.0, 10.0, 0.125),
-    "opus":   (2.0, 10.0, 4.0, 0.1),
-    "sonnet": (1.0, 5.0, 2.0, 0.1),
-    "haiku":  (0.05, 0.25, 0.1, 0.005),
+PRICES = {
+    ("fable", "5.2"): (8, 40, 16, 0.20),
+    ("fable", "5.1"): (10, 50, 20, 0.25),
+    ("fable", "5"): (10, 50, 20, 1.00),
+    ("opus", "5.5"): (4, 20, 8, 0.20),
+    ("opus", "5"): (5, 25, 10, 0.50),
+    ("opus", "4.8"): (5, 25, 10, 0.50),
+    ("opus", "4.7"): (5, 25, 10, 0.50),
+    ("opus", "4.6"): (5, 25, 10, 0.50),
+    ("opus", "4.5"): (5, 25, 10, 0.50),
+    ("opus", "4.1"): (15, 75, 30, 1.50),
+    ("opus", "4"): (15, 75, 30, 1.50),
+    ("sonnet", "5.5"): (2, 10, 4, 0.10),
+    ("sonnet", "5"): (2, 10, 4, 0.20),
+    ("sonnet", "4.6"): (3, 15, 6, 0.30),
+    ("sonnet", "4.5"): (3, 15, 6, 0.30),
+    ("sonnet", "4"): (3, 15, 6, 0.30),
+    ("haiku", "5.5"): (0.10, 0.50, 0.20, 0.01),
+    ("haiku", "4.5"): (1, 5, 2, 0.10),
 }
+# Priced by prompt length: a call whose prompt (input + cache write + cache
+# read) is over the threshold pays every price times the multiplier.
+LONG = {("haiku", "5.5"): (100_000, 5.0)}
+# The version to assume when a model id names no known version, and for
+# "what if this ran on Fable" before you have used that family yourself.
+NEWEST = {"fable": "5.2", "opus": "5.5", "sonnet": "5.5", "haiku": "5.5"}
+UNIT_DOLLARS = 2.0
 MODELS = ["fable", "opus", "sonnet", "haiku"]
 # A fresh session that takes over through a handoff note does not start from
 # the bare system prompt: it also reads the note and re-reads a few files.
@@ -89,6 +114,28 @@ def key_of(model):
     return "sonnet"
 
 
+# "claude-opus-5-5" -> "5.5", "claude-haiku-4-5-20251001" -> "4.5",
+# "claude-opus-4-20250514" -> "4".  The negative lookahead stops a date
+# suffix being read as a minor version.
+VER_RE = re.compile(r"(?:fable|mythos|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)")
+
+
+def ver_of(model):
+    m = VER_RE.search((model or "").lower())
+    if not m:
+        return ""
+    return m.group(1) + ("." + m.group(2) if m.group(2) else "")
+
+
+def price(fam, ver, prompt):
+    """Units per token (input, output, cache write, cache read) for one call."""
+    p = PRICES.get((fam, ver)) or PRICES[(fam, NEWEST[fam])]
+    ver = ver if (fam, ver) in PRICES else NEWEST[fam]
+    lim = LONG.get((fam, ver))
+    big = lim[1] if lim and prompt > lim[0] else 1.0
+    return [x / UNIT_DOLLARS * big for x in p]
+
+
 def ts(s):
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
@@ -99,28 +146,37 @@ def ts(s):
 # Fitted multipliers per token type (K) and per model (MM); 1.0 = list price.
 K = [1.0, 1.0, 1.0, 1.0]
 MM = {k: 1.0 for k in MODELS}
+# The version each family is re-priced on ("what if this ran on Opus"): the
+# newest one you have actually used, filled in after the transcripts are read.
+DEFAULT = dict(NEWEST)
 
 
-def w(model_key, prompt):
-    """Unit weight per token type for one call on model_key."""
-    base = LIST[model_key]
-    big = 2.0 if model_key == "haiku" and prompt > 100_000 else 1.0  # Haiku doubles past 100k
-    return [base[i] * K[i] * MM[model_key] * big for i in range(4)]
+def w(model_key, prompt, ver=None):
+    """Unit weight per token type for one call on model_key (fitted weights)."""
+    base = price(model_key, ver or DEFAULT[model_key], prompt)
+    return [base[i] * K[i] * MM[model_key] for i in range(4)]
 
 
 def units(c, model_key=None):
-    """Work units of one call, optionally re-priced on another model."""
-    mk = model_key or c["k"]
-    ww = w(mk, c["p"])
+    """Work units of one call: on the version it ran on, or re-priced on
+    another family's usual version."""
+    if model_key is None or model_key == c["k"]:
+        ww = w(c["k"], c["p"], c["v"])
+    else:
+        ww = w(model_key, c["p"])
     return c["i"] * ww[0] + c["o"] * ww[1] + c["w"] * ww[2] + c["r"] * ww[3]
 
 
+def is_long(c):
+    lim = LONG.get((c["k"], c["v"] if (c["k"], c["v"]) in PRICES else NEWEST[c["k"]]))
+    return bool(lim and c["p"] > lim[0])
+
+
 def list_units(c):
-    """The same at plain list weights: the fixed yardstick of the ledger.
+    """The same at plain list prices: the fixed yardstick of the ledger.
     It never changes when the fit does, so old and new rows stay comparable."""
-    L = LIST[c["k"]]
-    big = 2.0 if c["k"] == "haiku" and c["p"] > 100_000 else 1.0
-    return (c["i"] * L[0] + c["o"] * L[1] + c["w"] * L[2] + c["r"] * L[3]) * big
+    L = price(c["k"], c["v"], c["p"])
+    return c["i"] * L[0] + c["o"] * L[1] + c["w"] * L[2] + c["r"] * L[3]
 
 
 # ---------------------------------------------------------------------------
@@ -278,20 +334,37 @@ for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
             i = u.get("input_tokens", 0) or 0
             w_ = u.get("cache_creation_input_tokens", 0) or 0
             r = u.get("cache_read_input_tokens", 0) or 0
-            c = {"t": t, "k": key_of(m.get("model")), "model": m.get("model", "?"),
+            c = {"t": t, "k": key_of(m.get("model")), "v": ver_of(m.get("model")), "model": m.get("model", "?"),
                  "i": i, "o": u.get("output_tokens", 0) or 0, "w": w_, "r": r, "p": i + w_ + r,
-                 "main": is_main and not d.get("isSidechain"), "sub": is_sub or (is_main and d.get("isSidechain")),
+                 "main": is_main and not d.get("isSidechain"), "sub": bool(is_sub or (is_main and d.get("isSidechain"))),
                  "stop": m.get("stop_reason")}
             key = m.get("id") or d.get("uuid")
             prev = calls.get(key)
+            # The same reply can be logged more than once: while it streams
+            # (keep the newest copy's token counts) and in a forked or resumed
+            # session's transcript (a copy of the parent's history).  Whether
+            # it belongs to THIS session must not depend on which file was read
+            # last, so the flags are combined across every copy.
             if prev is None or t >= prev["t"]:
+                if prev is not None:
+                    c["main"] = c["main"] or prev["main"]
+                    c["sub"] = c["sub"] or prev["sub"]
                 calls[key] = c
+            else:
+                prev["main"] = prev["main"] or c["main"]
+                prev["sub"] = prev["sub"] or c["sub"]
             if c["main"] and (last_main is None or t >= last_main["t"]):
                 last_main = c
 
 CALLS = sorted(calls.values(), key=lambda c: c["t"])
 prompts.sort()
 all_prompts.sort()
+
+# Re-price each family on the version you used most recently (CALLS is in
+# time order, so the last one seen wins); families you have not used keep NEWEST.
+for c in CALLS:
+    if (c["k"], c["v"]) in PRICES:
+        DEFAULT[c["k"]] = c["v"]
 
 # Ticks taken over from v2 carry no list units yet: add them (the window's
 # list units from its start up to the moment of the reading).
@@ -349,12 +422,11 @@ for ra, lst in by_win.items():
         x = [0.0, 0.0, 0.0]
         per_model = {}
         for c in calls_between(a["at"], b["at"]):
-            L = LIST[c["k"]]
-            big = 2.0 if c["k"] == "haiku" and c["p"] > 100_000 else 1.0
-            x[0] += c["o"] * L[1] * big
-            x[1] += (c["w"] * L[2] + c["i"] * L[0]) * big
-            x[2] += c["r"] * L[3] * big
-            per_model[c["k"]] = per_model.get(c["k"], 0.0) + (c["o"] * L[1] + c["w"] * L[2] + c["i"] * L[0] + c["r"] * L[3]) * big
+            L = price(c["k"], c["v"], c["p"])
+            x[0] += c["o"] * L[1]
+            x[1] += c["w"] * L[2] + c["i"] * L[0]
+            x[2] += c["r"] * L[3]
+            per_model[c["k"]] = per_model.get(c["k"], 0.0) + list_units(c)
         ticks.append((dp, x, per_model, a["at"], b["at"]))
 
 fit = {"source": "list", "ticks": len(ticks), "r2": None, "K": [1, 1, 1, 1], "MM": dict(MM), "model_ticks": {}}
@@ -435,7 +507,10 @@ def totals(a, b=None, pred=None):
         u = units(c)
         r["units"] += u
         r["listUnits"] += list_units(c)
-        mm = r["models"].setdefault(c["model"], {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "units": 0.0})
+        # Calls billed at a long-prompt price are kept apart ("#long"), so the
+        # ledger can re-price them at that price later.
+        mm = r["models"].setdefault(c["model"] + ("#long" if is_long(c) else ""),
+                                    {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "units": 0.0})
         mm["input"] += c["i"]; mm["output"] += c["o"]; mm["cache_write"] += c["w"]; mm["cache_read"] += c["r"]; mm["units"] += u
     r["units"] = round(r["units"])
     r["listUnits"] = round(r["listUnits"])
@@ -482,7 +557,7 @@ if mine:
             by_model[c["k"]] = by_model.get(c["k"], 0.0) + u
             fc = c
             if c["main"]:
-                ww = w(c["k"], c["p"])
+                ww = w(c["k"], c["p"], c["v"])
                 h = min(hist_tok, c["p"])
                 # history normally comes from the warm cache; past what was
                 # read, it had to be written again (a cold cache)
@@ -543,6 +618,9 @@ if main_path or mine:
         "compactionsAll": len(compactions),
         "lastCompact": compactions[-1][0] if compactions else None,
         "lastSeen": last_main["t"] if last_main else None,
+        # A prompt cache belongs to one model: the mod compares this with the
+        # model you are on now to know whether the cache is still yours.
+        "lastModel": last_main["k"] if last_main else None,
         "subagentCalls": sum(1 for c in mine if c["sub"]),
     }
 out["_session"] = ses
@@ -553,8 +631,10 @@ out["_weights"] = {k: [round(x, 5) for x in w(k, 0)] for k in MODELS}
 out["_handoff"] = {"extra": HANDOFF_EXTRA, "noteOut": HANDOFF_NOTE_OUT}
 
 # ---------------------------------------------------------------------------
-# Ledger: one record per finished window.  Units come from the transcripts
-# over the whole window; the meter figure is the last reading seen.
+# Ledger: one record per finished window.  The meter figure is the last
+# reading seen, and the units are counted only up to that same moment: work
+# done after the last reading moved the meter unseen, so counting it would
+# make a percent look bigger than it was (and a later window look shrunk).
 # A tick with almost no local work behind it is "outside use" (claude.ai
 # chat or the phone app's own chats: the meter moved, nothing here did).
 # ---------------------------------------------------------------------------
@@ -577,12 +657,13 @@ new_rows = []
 for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
     lst = [s for s in samples if s.get("kind") == kind and s.get("resetsAt") == ra]
     top = max(lst, key=lambda s: s["pct"])
-    tot = totals(st, en)
+    tot = totals(st, min(en, top["at"]))
     mu = sorted(tot["models"].items(), key=lambda kv: -kv[1]["units"])
     models = [key_of(m).capitalize() for m, v in mu if tot["units"] and v["units"] / tot["units"] >= 0.1]
+    # per exact model id, so the audit can re-price each version on its own
     by_model = {}
     for m, v in tot["models"].items():
-        bm = by_model.setdefault(key_of(m), [0, 0, 0, 0])
+        bm = by_model.setdefault(m, [0, 0, 0, 0])
         for j, f_ in enumerate(("input", "output", "cache_write", "cache_read")):
             bm[j] += v[f_]
     # per 1% in list units (the fixed yardstick)
@@ -606,8 +687,10 @@ def row_units(r):
     if not bm:
         return r.get("units") or 0
     tot = 0.0
-    for k, t in bm.items():
-        ww = w(k if k in LIST else "sonnet", 0)
+    # keys are model ids, "#long" for calls billed at a long-prompt price
+    # (older rows: family names, priced on that family's usual version)
+    for m, t in bm.items():
+        ww = w(key_of(m), float("inf") if m.endswith("#long") else 0, ver_of(m) or None)
         tot += t[0] * ww[0] + t[1] * ww[1] + t[2] * ww[2] + t[3] * ww[3]
     return tot
 
@@ -619,6 +702,10 @@ if starts and since5h:
     cur = out.get(str(int(since5h)))
     cur_s = [s for s in samples if s.get("kind") == "five_hour" and abs(win_bounds("five_hour", s.get("resetsAt"))[0] - since5h) < 120]
     cur_pct = max([s["pct"] for s in cur_s] or [0])
+    # Count work only up to the newest reading, the same rule as the ledger:
+    # anything after it has not shown on the meter yet.
+    cur_at = max([s["at"] for s in cur_s if s["pct"] == cur_pct] or [now])
+    cur = totals(since5h, cur_at) if cur_s else cur
     per1_now = cur["units"] / cur_pct if cur and cur_pct > 0 else None
     if vals:
         q = lambda p: vals[min(len(vals) - 1, max(0, int(round(p * (len(vals) - 1)))))]

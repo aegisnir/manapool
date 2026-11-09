@@ -28,6 +28,7 @@ export type Session = {
   share1h: number | null; hourUnits: number
   compactions: number; compactionsAll: number; lastCompact: number | null
   lastSeen: number | null; subagentCalls: number
+  lastModel?: string | null  // family of the newest main-thread reply: whose prompt cache it is
 }
 // One finished window, kept forever (the limit audit).
 export type LedgerRow = {

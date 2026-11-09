@@ -60,7 +60,7 @@ Anthropic does not publish how a subscription weighs different models and token 
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
 - It only sees Claude Code on the computer it runs on. Chat on claude.ai, other computers and the phone app also move the meter but are not counted (the Limit check can flag them, not measure them).
 
-List-price weights live in the `LISTW` table near the top of `hooks/register.tsx`. Update them when prices change.
+List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row per model version (Haiku 5.5's long-prompt price is in `LONG`). Update them when prices change.
 
 ## Privacy
 
