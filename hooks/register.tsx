@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.4' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.5' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -440,6 +440,7 @@ export const register: Register = on => {
   let compactOff = false  // auto-compact is switched off: no auto-compact estimates at all
   let compactAtRead = 0
   let pruned = 0          // when old per-session entries were last cleared out
+  let version = ''        // from plugin.json, shown after the title
   let alerts: AlertState | undefined
 
   // Refresh soon after an event, once the transcript is on disk (it lags a
@@ -652,6 +653,8 @@ export const register: Register = on => {
     await $.command.register({ name: CMD, description: 'Mana Pool: limit runway, turn cost, hand-off advice and the limit audit' }).catch(() => undefined)
     sid = await $.session.id().catch(() => '')
     alerts = undefined
+    // The version shown next to the title comes from plugin.json, so it can't drift.
+    try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch { /* no label */ }
     // Load stamp: which build is running, so a reload can be confirmed from the store.
     await $.store.set('loaded', { build: BUILD, at: await $.clock.now() } as any).catch(() => undefined)
     const io: IO = {
@@ -1002,7 +1005,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" paddingX={1} width={CW + 2}>
         <Box justifyContent="space-between">
-          <Box><Text size="footnote" weight="semibold">Mana Pool</Text>{spin()}</Box>
+          <Box><Text size="footnote" weight="semibold">Mana Pool</Text>{version ? <Text size="footnote" dimColor>  v{version}</Text> : null}{spin()}</Box>
           <Box>
             {icon('ⓘ', 'Manual', openManual)}
             <Box>{icon('⊖', 'Collapse', () => update($, mode, () => 'mini'))}</Box>
