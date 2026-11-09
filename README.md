@@ -64,7 +64,7 @@ List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row 
 
 ## Privacy
 
-It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts (no conversation text) in the mod's own store. Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are `python3` (the scanner) and, on macOS, `osascript` (the notification fallback).
+It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts (no conversation text) in the mod's own store and in one tick-log file, `~/.claude/plugins/data/manapool/samples.jsonl`. Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are `python3` (the scanner) and, on macOS, `osascript` (the notification fallback).
 
 ## Files
 

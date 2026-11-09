@@ -13,11 +13,20 @@ Called by the mod (hooks/register.tsx) with:
           --since5h=<epoch>     start of the current 5H window
           --now=<epoch>         the mod's clock
           --busy=1              a turn is still running (the newest turn is not finished)
-  stdin: {"samples": [...], "ledger": [...]}  what the mod has saved (may be empty)
+          --model=<id>          the model the session is on now (e.g. claude-opus-5-5)
+          --data-dir=<path>     where the tick log lives (samples.jsonl)
+          --reading=<kind>|<resetsAt>|<pct>   a meter reading taken just now (one per window)
+  stdin: {"samples": [...], "ledger": [...]}  what the mod has saved (may be empty;
+         samples here only seed the tick log file the first time)
 
   scan.py --export=<csv path>   with the same stdin: writes the ledger as CSV
 
 Prints one JSON object (see the bottom of this file for its fields).
+
+The tick log is shared by every open session.  It lives in its own file,
+changed only under an exclusive file lock, so two sessions saving readings at
+the same moment can never overwrite each other's (the mod's key-value store
+has no way to do that safely).
 
 Units: "work units" weigh each token by type and model, so a cheap cache read
 does not count like an expensive output token.  1 unit = one Sonnet input
@@ -25,14 +34,47 @@ token at list price.  The weights start at API list prices and switch to
 weights fitted from your own meter ticks once there are enough clean ticks.
 """
 import csv, glob, json, os, re, sys
+
+# File locking: fcntl on macOS and Linux, msvcrt on Windows.
+try:
+    import fcntl
+
+    def lock(f):
+        fcntl.flock(f, fcntl.LOCK_EX)
+
+    def unlock(f):
+        fcntl.flock(f, fcntl.LOCK_UN)
+except ImportError:
+    import msvcrt
+
+    def lock(f):
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises
+                return
+            except OSError:
+                continue
+
+    def unlock(f):
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
 starts, session_id, since5h, now, busy, export = [], "", 0.0, 0.0, False, ""
+cur_model, data_dir, readings = "", "", []
 for a in sys.argv[1:]:
-    if a.startswith("--session-id="):
+    if a.startswith("--model="):
+        cur_model = a.split("=", 1)[1].strip()
+    elif a.startswith("--data-dir="):
+        data_dir = os.path.expanduser(a.split("=", 1)[1])
+    elif a.startswith("--reading="):
+        kind_, ra_, pct_ = a.split("=", 1)[1].split("|")
+        readings.append((kind_, ra_, float(pct_)))
+    elif a.startswith("--session-id="):
         session_id = a.split("=", 1)[1].strip()
     elif a.startswith("--since5h="):
         since5h = float(a.split("=", 1)[1])
@@ -53,6 +95,27 @@ except Exception:
     given = {}
 samples = given.get("samples") or []
 ledger = given.get("ledger") or []
+
+# The tick log file (one reading per line).  Read here without the lock: a
+# reading appended a moment later only matters to the next scan.  Seeded once
+# from the mod's store when the file does not exist yet.
+SAMPLES_FILE = os.path.join(data_dir, "samples.jsonl") if data_dir else ""
+LOCK_FILE = os.path.join(data_dir, "lock") if data_dir else ""
+
+
+def read_log():
+    out = []
+    with open(SAMPLES_FILE) as f:
+        for line in f:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                pass  # a half-written line from a crash: skip it
+    return out
+
+
+if SAMPLES_FILE and os.path.exists(SAMPLES_FILE):
+    samples = read_log()
 
 HOME = os.path.expanduser("~")
 ROOT = os.path.join(HOME, ".claude", "projects")
@@ -158,9 +221,11 @@ def w(model_key, prompt, ver=None):
 
 
 def units(c, model_key=None):
-    """Work units of one call: on the version it ran on, or re-priced on
-    another family's usual version."""
-    if model_key is None or model_key == c["k"]:
+    """Work units of one call: as it ran (its own version), or re-priced on a
+    family's current version (the one you are on now, else the one you used
+    last).  Re-pricing applies within a family too: Haiku 4.5 turns forecast
+    on Haiku 5.5 at Haiku 5.5's prices."""
+    if model_key is None:
         ww = w(c["k"], c["p"], c["v"])
     else:
         ww = w(model_key, c["p"])
@@ -241,7 +306,12 @@ def win_bounds(kind, resets_at):
 
 # Windows that have ended and are not in the ledger yet (only those whose
 # transcripts are still on disk: Claude Code keeps about 30 days).
-done = {(r.get("kind"), r.get("resetsAt")) for r in ledger}
+# Rows from before 2026-11-09 (no "rule": 2) counted work past the last
+# reading, so they can read too high.  They are rebuilt below while their
+# transcripts and readings are still on disk, and left out of the limit check
+# otherwise.
+RULE = 2
+done = {(r.get("kind"), r.get("resetsAt")) for r in ledger if (r.get("rule") or 0) >= RULE}
 closing = {}
 for s in samples:
     k = (s.get("kind"), s.get("resetsAt"))
@@ -365,6 +435,9 @@ all_prompts.sort()
 for c in CALLS:
     if (c["k"], c["v"]) in PRICES:
         DEFAULT[c["k"]] = c["v"]
+# The model you are on right now wins for its own family.
+if (key_of(cur_model), ver_of(cur_model)) in PRICES:
+    DEFAULT[key_of(cur_model)] = ver_of(cur_model)
 
 # Ticks taken over from v2 carry no list units yet: add them (the window's
 # list units from its start up to the moment of the reading).
@@ -544,10 +617,13 @@ if mine:
         ctx0 = mc[0]["p"] if mc else 0
         # A compaction during this turn shrinks the context: history is what was there before
         hist_tok = max(0, ctx0 - base)
-        u_all = 0.0; u_hist = 0.0; u_extra = 0.0; out_tok = 0; by_model = {}
+        u_all = 0.0; u_hist = 0.0; u_fresh = 0.0; out_tok = 0; by_model = {}
         # The same turn priced on every model, two ways: "here" = the turn as it
-        # ran (old conversation included), "fresh" = the turn in a new session
-        # after a hand-off (old conversation gone, the hand-off allowance read).
+        # ran (old conversation included) but with a WARM cache, "fresh" = the
+        # turn in a new session after a hand-off (old conversation gone, the
+        # hand-off allowance read).  "here" is warm on purpose: when a turn ran
+        # on a cold cache, its re-cache is a one-time cost the mod adds back
+        # only when the cache is cold now, so it is never counted twice.
         on_here = {k: 0.0 for k in MODELS}
         on_fresh = {k: 0.0 for k in MODELS}
         for c in tc:
@@ -556,23 +632,30 @@ if mine:
             out_tok += c["o"]
             by_model[c["k"]] = by_model.get(c["k"], 0.0) + u
             fc = c
+            wc = c
             if c["main"]:
                 ww = w(c["k"], c["p"], c["v"])
                 h = min(hist_tok, c["p"])
                 # history normally comes from the warm cache; past what was
                 # read, it had to be written again (a cold cache)
                 from_read = min(h, c["r"])
-                u_hist += from_read * ww[3] + (h - from_read) * ww[2]
-                u_extra += HANDOFF_EXTRA * ww[3]
-                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=max(0, c["w"] - (h - from_read)),
+                cold = h - from_read
+                u_hist += from_read * ww[3] + cold * ww[2]
+                wc = dict(c, r=c["r"] + cold, w=max(0, c["w"] - cold))
+                fc = dict(c, r=c["r"] - from_read + HANDOFF_EXTRA, w=max(0, c["w"] - cold),
                           p=max(0, c["p"] - h + HANDOFF_EXTRA))
+            # The fresh-session price uses the fresh prompt's own length, so a
+            # call that drops under a long-prompt threshold (Haiku 5.5 past
+            # 100k) is priced at the normal rate.
+            ffw = w(fc["k"], fc["p"], fc["v"])
+            u_fresh += fc["i"] * ffw[0] + fc["o"] * ffw[1] + fc["w"] * ffw[2] + fc["r"] * ffw[3]
             for k in MODELS:
-                on_here[k] += units(c, k)
+                on_here[k] += units(wc, k)
                 on_fresh[k] += units(fc, k)
         model = max(by_model, key=by_model.get) if by_model else ""
         turns.append({
             "t": round(prompts[idx]), "u": round(u_all), "h": round(min(u_hist, u_all)),
-            "f": round(max(0.0, u_all - u_hist) + u_extra),
+            "f": round(u_fresh),
             "n": len(tc), "subs": sum(1 for c in tc if c["sub"]), "out": out_tok,
             "ctx": ctx0, "k": model,
             "on": {k: round(v) for k, v in on_here.items()},
@@ -620,7 +703,7 @@ if main_path or mine:
         "lastSeen": last_main["t"] if last_main else None,
         # A prompt cache belongs to one model: the mod compares this with the
         # model you are on now to know whether the cache is still yours.
-        "lastModel": last_main["k"] if last_main else None,
+        "lastModel": (last_main["k"] + ("-" + last_main["v"] if last_main["v"] else "")) if last_main else None,
         "subagentCalls": sum(1 for c in mine if c["sub"]),
     }
 out["_session"] = ses
@@ -673,7 +756,7 @@ for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
         "units": tot["listUnits"], "per1": round(per1) if per1 else None,
         "tokens": [tot["input"], tot["output"], tot["cache_write"], tot["cache_read"]], "byModel": by_model,
         "models": sorted(set(models), key=models.index), "outside": outside(kind, ra, per1),
-        "weights": "list", "at": now, "readings": len(lst),
+        "weights": "list", "at": now, "readings": len(lst), "rule": RULE,
     })
 out["_ledgerNew"] = new_rows
 
@@ -695,7 +778,9 @@ def row_units(r):
     return tot
 
 
-full = [r for r in ledger + new_rows if r.get("kind") == "five_hour" and (r.get("pct") or 0) >= 20]
+rebuilt = {(r["kind"], r["resetsAt"]) for r in new_rows}
+kept = [r for r in ledger if (r.get("rule") or 0) >= RULE and (r.get("kind"), r.get("resetsAt")) not in rebuilt]
+full = [r for r in kept + new_rows if r.get("kind") == "five_hour" and (r.get("pct") or 0) >= 20]
 vals = sorted(row_units(r) / r["pct"] for r in full if row_units(r) > 0)
 chk = None
 if starts and since5h:
@@ -718,5 +803,55 @@ if starts and since5h:
 out["_check"] = chk
 if imported is not None:
     out["_imported"] = imported
+# ---------------------------------------------------------------------------
+# Save this scan's meter readings to the shared tick log, under an exclusive
+# lock: read the newest log, add a reading only if its window's percent went
+# up, write, release.  Other sessions wait their turn for these few
+# milliseconds, so no reading is ever lost.  The time is kept to the
+# fraction of a second, so "work up to this reading" never drops a reply
+# that landed in the same second.
+# ---------------------------------------------------------------------------
+def sample_of(kind, ra, pct):
+    st = win_bounds(kind, ra)[0] if ra else now - SPAN[kind]
+    t = totals(st, now)
+    models = {m: [v["input"], v["output"], v["cache_write"], v["cache_read"]] for m, v in t["models"].items()}
+    return {"at": now, "kind": kind, "pct": pct, "lu": t["listUnits"], "fresh": t["input"] + t["output"] + t["cache_write"],
+            "resetsAt": ra, "mix": [t["input"], t["output"], t["cache_write"], t["cache_read"]], "models": models}
+
+
+if SAMPLES_FILE:
+    os.makedirs(data_dir, exist_ok=True)
+    with open(LOCK_FILE, "a+") as lk:
+        lock(lk)
+        try:
+            exists = os.path.exists(SAMPLES_FILE)
+            log = read_log() if exists else clean(given.get("samples") or [])
+            top = {}
+            for s in log:
+                k = (s.get("kind"), s.get("resetsAt") or "")
+                top[k] = max(top.get(k, -1), s.get("pct", -1))
+            add = [sample_of(kind, ra, pct) for kind, ra, pct in readings
+                   if kind in SPAN and pct > top.get((kind, ra or ""), -1)]
+            log += add
+            # Older than 30 days is no use (its transcripts are gone): rewrite
+            # without it once in a while; otherwise just append.
+            keep = [s for s in log if s.get("at", 0) >= now - 30 * 86400][-3000:]
+            if not exists or len(keep) < len(log):
+                tmp = SAMPLES_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    for s in keep:
+                        f.write(json.dumps(s, separators=(",", ":")) + "\n")
+                os.replace(tmp, SAMPLES_FILE)
+                log = keep
+            elif add:
+                with open(SAMPLES_FILE, "a") as f:
+                    for s in add:
+                        f.write(json.dumps(s, separators=(",", ":")) + "\n")
+            samples = clean(log)
+            out["_samplesFile"] = True
+        finally:
+            unlock(lk)
+    out["_samples"] = samples
+
 out["_ticks"] = len(samples)
 print(json.dumps(out))
