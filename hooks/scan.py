@@ -301,10 +301,11 @@ if imported is not None:
 
 def cut(s):
     """The moment a reading covers work up to.  Readings saved before
-    2026-11-09 were rounded down to the whole second, so a reply in that same
-    second may be missing: for those, count to the end of the second."""
+    2026-11-09 were rounded down to the whole second (they carry no "ts"
+    mark), so a reply in that same second may be missing: for those, count to
+    the end of the second.  Marked readings are exact, even at .000."""
     at = s.get("at", 0)
-    return at + 1 if float(at).is_integer() else at
+    return at + 1 if not s.get("ts") and float(at).is_integer() else at
 
 
 def win_bounds(kind, resets_at):
@@ -314,11 +315,11 @@ def win_bounds(kind, resets_at):
 
 # Windows that have ended and are not in the ledger yet (only those whose
 # transcripts are still on disk: Claude Code keeps about 30 days).
-# Rows from before 2026-11-09 (no "rule": 2) counted work past the last
+# Rows from older rules counted work past the last
 # reading, so they can read too high.  They are rebuilt below while their
 # transcripts and readings are still on disk, and left out of the limit check
 # otherwise.
-RULE = 2
+RULE = 3  # 3: 2026-11-09 evening (exact reading times); 2 had the whole-second cutoff
 # A row is also redone when the log holds a higher reading for its window
 # than the row used (a session saved its reading after another session had
 # already closed the window).
@@ -662,10 +663,10 @@ if mine:
                 from_read = min(h, c["r"])
                 hw, hi = split(h - from_read)
                 u_hist += from_read * ww[3] + hw * ww[2] + hi * ww[0]
-                # Warm baseline: everything this call re-sent from earlier turns
-                # (the session's start included) counts as a cache read.  On the
-                # session's first turn nothing was cached before.
-                reuse = min(ctx0, c["p"]) if idx > 0 else h
+                # Warm baseline (a forecast, never the measured cost): the whole
+                # prompt this turn started from counts as a cache read, on the
+                # first turn too, because the next turn re-sends all of it.
+                reuse = min(ctx0, c["p"])
                 rw, ri = split(reuse - min(reuse, c["r"]))
                 wc = dict(c, r=c["r"] + rw + ri, w=c["w"] - rw, i=c["i"] - ri)
                 # Fresh session: the history is gone, the hand-off allowance read.
@@ -847,7 +848,7 @@ def sample_of(kind, ra, pct):
     st = win_bounds(kind, ra)[0] if ra else now - SPAN[kind]
     t = totals(st, now)
     models = {m: [v["input"], v["output"], v["cache_write"], v["cache_read"]] for m, v in t["models"].items()}
-    return {"at": now, "kind": kind, "pct": pct, "lu": t["listUnits"], "fresh": t["input"] + t["output"] + t["cache_write"],
+    return {"at": now, "ts": 2, "kind": kind, "pct": pct, "lu": t["listUnits"], "fresh": t["input"] + t["output"] + t["cache_write"],
             "resetsAt": ra, "mix": [t["input"], t["output"], t["cache_write"], t["cache_read"]], "models": models}
 
 
