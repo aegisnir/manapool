@@ -248,11 +248,8 @@ def list_units(c):
 # CSV export: no transcript reading needed.
 # ---------------------------------------------------------------------------
 def et(epoch):
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.fromtimestamp(epoch, ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
-    except Exception:
-        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    """A time for the CSV, in the computer's own time zone (named, e.g. "PST")."""
+    return datetime.fromtimestamp(epoch).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 
 
 if export:
@@ -276,12 +273,6 @@ if export:
     print(json.dumps({"exported": export, "rows": len(ledger)}))
     sys.exit(0)
 
-# ---------------------------------------------------------------------------
-# (No import of older logs in the public build.)
-# ---------------------------------------------------------------------------
-imported = None
-
-
 def clean(lst):
     """A window's percent only goes up; a lower reading is stale (another open session)."""
     top, out = {}, []
@@ -295,8 +286,6 @@ def clean(lst):
 
 
 samples = clean(samples)
-if imported is not None:
-    imported = samples  # hand back the cleaned copy
 
 
 def cut(s):
@@ -455,15 +444,6 @@ for c in CALLS:
 # The model you are on right now wins for its own family.
 if (key_of(cur_model), ver_of(cur_model)) in PRICES:
     DEFAULT[key_of(cur_model)] = ver_of(cur_model)
-
-# Ticks taken over from v2 carry no list units yet: add them (the window's
-# list units from its start up to the moment of the reading).
-if imported is not None:
-    for s in imported:
-        if "lu" not in s and s.get("kind") in SPAN and s.get("resetsAt"):
-            st = win_bounds(s["kind"], s["resetsAt"])[0]
-            if st >= oldest:
-                s["lu"] = round(sum(list_units(c) for c in CALLS if st <= c["t"] <= s["at"]))
 
 # ---------------------------------------------------------------------------
 # Weight fit from real meter ticks (5H only: it moves often enough).
@@ -834,8 +814,6 @@ if starts and since5h:
     chk = {"per1": round(per1_now) if per1_now else None, "pct": cur_pct, "lo": round(lo_) if lo_ else None, "hi": round(hi_) if hi_ else None, "n": len(vals), "weights": fit["source"],
            "outside": outside("five_hour", rs, (cur["listUnits"] / cur_pct) if cur and cur_pct > 0 else 0) if rs else 0}
 out["_check"] = chk
-if imported is not None:
-    out["_imported"] = imported
 # ---------------------------------------------------------------------------
 # Save this scan's meter readings to the shared tick log, under an exclusive
 # lock: read the newest log, add a reading only if its window's percent went

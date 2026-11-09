@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.5' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.6' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -105,7 +105,7 @@ const SURFACE = '#262626'
 const RED = '#f87171'
 const ME = '#a98bf5'      // your current model, and "new work" in the turn strip
 const HIST = '#6b6b6b'    // "re-reading history" in the turn strip
-const DIM = '#9a9a9a'     // caption grey (5.4:1 on the band; v2's #8a8a8a was 4.4:1)
+const DIM = '#9a9a9a'     // caption grey (5.4:1 contrast on the band)
 // Pill levels: 0 green, 1 blue (an opportunity), 2 amber, 3 red.
 const LVL = ['#35d399', '#7fb2ff', '#fbbf25', '#f87171']
 
