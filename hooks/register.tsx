@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-06.30' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.1' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -17,12 +17,19 @@ const SPAN: Record<string, number> = { five_hour: 5 * 3600, seven_day: 7 * 86400
 // (Claude Code asks for the 1-hour kind), then the next message pays to reload it.
 const TTL_MS = 60 * 60 * 1000
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
-// Units per token at list prices (1 unit = one Sonnet input token):
-// input, output, cache write, cache read.  scan.py sends the weights in use
-// (fitted from your own meter ticks once there are enough); this is the fallback.
+// Units per token at list prices (1 unit = one Sonnet 5.5 input token, $2 per
+// million): input, output, cache write, cache read.  scan.py sends the weights
+// in use (per model version, fitted from your own meter ticks once there are
+// enough); this is only the fallback before the first scan.
 const LISTW: Record<string, number[]> = {
-  fable: [5, 25, 10, 0.125], opus: [2, 10, 4, 0.1], sonnet: [1, 5, 2, 0.1], haiku: [0.05, 0.25, 0.1, 0.005],
+  fable: [4, 20, 8, 0.1], opus: [2, 10, 4, 0.1], sonnet: [1, 5, 2, 0.05], haiku: [0.05, 0.25, 0.1, 0.005],
 }
+// Saved per-session entries (ses:<id>, alerts:<id>) are dropped after this
+// long unused.  The whole store is capped at 4 MiB by Claude Code.
+const KEEP_SESSION_MS = 7 * 86400e3
+const MAX_SESSIONS = 40
+const MAX_SAMPLES = 3000
+const MAX_LEDGER = 3000
 // A runway shorter than this raises one system notification per 5H window.
 const WALL_MS = 30 * 60 * 1000
 
@@ -163,10 +170,14 @@ const derive = (v: View, last: number | null, now: number) => {
   }
 
   // --- cache ---
+  // A prompt cache belongs to one model.  After a switch to another model the
+  // conversation is not cached for it, however recent the last reply was.
   const idle = last ? now - last : null
-  const warm = idle !== null && idle < TTL_MS
+  const cacheModel = ses?.lastModel ?? me
+  const otherModel = idle !== null && cacheModel !== me
+  const warm = idle !== null && idle < TTL_MS && !otherModel
   const ctxTok = v.ctx?.tokens ?? lt?.ctx ?? 0
-  // When the prompt cache expires, the conversation is written to cache again instead of read.
+  // When the prompt cache is cold, the conversation is written to cache again instead of read.
   const reloadU = ctxTok * (wm[2] - wm[3])
 
   // --- Cost pill: token overhead, break-even and the cache clock ---
@@ -209,9 +220,12 @@ const derive = (v: View, last: number | null, now: number) => {
 
   // --- switching models: here (reload this conversation on the other model)
   // or a new session with a hand-off note; both one-time costs ---
-  // Next turn on your model: the median of your last 3 finished turns.
+  // Next turn on your model: the median of your last 3 finished turns, each
+  // re-priced on the model you are on NOW (they may have run on another), plus
+  // re-caching the conversation once when the cache is cold (expired, or
+  // made by another model).
   const fin = done.slice(-3)
-  const nextU = fin.length ? median(fin.map(t => t.u)) : 0
+  const nextU = fin.length ? median(fin.map(t => t.on?.[me] ?? t.u)) + (idle !== null && !warm ? reloadU : 0) : 0
   // Per-turn cost on model k: your last 3 turns re-priced on k, either as they
   // ran here (old conversation re-read) or as they would run in a new session
   // after a hand-off (scan.py's `on` and `onf`).
@@ -240,7 +254,7 @@ const derive = (v: View, last: number | null, now: number) => {
   const allOn = MODELS.map(k => ({ k, pct: ses ? pc(ses.allOn[k] ?? 0) : 0 }))
 
   return {
-    w5, w7, ses, me, ok, pc, rate, turns, lt, est, pace, runway, idle, warm, ctxTok, reloadU, base, ho,
+    w5, w7, ses, me, ok, pc, rate, turns, lt, est, pace, runway, idle, warm, otherModel, ctxTok, reloadU, base, ho,
     ratio, rMed, payback, histShare, turnsTxt, cost, detail, worst, pctFull, compactAt, grow, turnsLeft,
     switchRows, sesPct, allOn, oneTimeU, nextU, fin,
   }
@@ -262,7 +276,7 @@ const summaryText = (v: View, last: number | null, now: number): string => {
   L.push(`Context: ${d.detail.label}  (${d.detail.why})`)
   if (d.lt && d.ok) L.push(`Last turn ${pctTxt(d.pc(d.lt.u))} of 5H · in a new session ~${pctTxt(d.pc(d.lt.f))} (${d.ratio.toFixed(1)}x) · ${Math.round(d.histShare * 100)}% re-reading the conversation`)
   if (d.ses && d.ok) L.push(`This session used ${pctTxt(d.sesPct)} of 5H · ${d.ses.turnCount} turns${d.ses.share1h !== null ? ` · ${Math.round(d.ses.share1h * 100)}% of last hour's use` : ''}`)
-  if (d.idle !== null) L.push(`Prompt cache ${d.warm ? `active, expires in ${dur(TTL_MS - d.idle)}` : 'expired'}`)
+  if (d.idle !== null) L.push(`Prompt cache ${d.warm ? `active, expires in ${dur(TTL_MS - d.idle)}` : d.otherModel ? 'cold (model changed)' : 'expired'}`)
   return L.join('\n')
 }
 
@@ -278,10 +292,10 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **7D / 5H bars**: how much of the weekly and 5-hour limits is used. The colour runs green (plenty left) to red (nearly full). `~` marks an estimated hundredth: the meter itself moves in whole points.')
   L.push('- **Above each bar**: the **pace** over the last hour (5H) or day (7D) of real ticks, and when the limit **resets**. If at that pace it would hit 100% first, the right side turns red: **runs out in N · resets in M**.')
   L.push('- **Last turn**: what your last message and the full reply cost (every model call in it, subagents included), in % of the 5H limit; what the same turn would cost **in a new session** that took over through a hand-off note, with the ratio in brackets; and how many turns a **hand-off** takes to pay for itself (writing the note plus the new session caching its start). The **Cost pill** on the right turns that into a call (rules below).')
-  L.push('- **Next turn**: what your next turn here should cost, in % of 5H: the middle of your last 3 finished turns. A forecast; Last turn is the measured one.')
+  L.push('- **Next turn**: what your next turn here should cost, in % of 5H: the middle of your last 3 finished turns, re-priced on the model you are on now, plus the one-time re-cache when the cache is cold. A forecast; Last turn is the measured one.')
   L.push('- **Turns**: one small bar per turn of this whole session: grey is the part spent **re-reading** the old conversation, violet the **new work**. Dim bars were before the current 5H window started (a thin line marks its start). Then the turn count, how much of the 5H limit this session has **used** since the window began, and its share of **last hour\'s use** (everything Claude Code used on this computer in the last hour, subagents included). Open the band in each session to see which one is eating the limit.')
   L.push('- **Context**: context size, how much of the window is used, how much it grows per turn, and how close auto-compact is, with the **Context pill**: a warning that the session is getting long enough for the model to lose track of earlier detail.')
-  L.push('- **Cache**: the prompt cache clock. **Active** means the conversation is still in the prompt cache, so the next message reads it cheaply (a *cache read*). An hour after the last reply the cache **expires**, and the next message here costs extra to re-cache the whole conversation (a *cache write*), once.')
+  L.push('- **Cache**: the prompt cache clock. **Active** means the conversation is still in the prompt cache, so the next message reads it cheaply (a *cache read*). An hour after the last reply the cache **expires**, and the next message here costs extra to re-cache the whole conversation (a *cache write*), once. A cache belongs to one model: after switching models it shows **Model changed**, and the next message pays that re-cache too.')
   L.push('- **Limit check** (once past windows are recorded): how much work 1% of your 5H limit buys in this window compared with your usual. **Normal** within 15% of usual; red when it buys 15%+ less (a shrinking limit), or when the meter moved with no Claude Code use on this computer (**used outside Claude Code**: claude.ai chat or the phone app). "Work" is your usage weighted by token type and model; see "Limit audit".')
   L.push('- **Other models**: one column for each model you are not on, and two ways to move to it, each shown as a one-time cost, then the cost per turn after it. **Switch now**: this session changes model, so the whole conversation is cached on the new model once, and every later turn still re-reads it. **Hand off**: write a hand-off note here and start a new session on that model; it caches only its small start, and its turns carry no old conversation. Per-turn costs are your last 3 turns re-priced on that model (assuming it would use the same tokens: Fable tends to think more, Haiku to write less). Green marks the cheaper path over the next 5 turns. As a session grows, switch now gets dearer and hand off wins.')
   L.push('- **ⓘ / ⊖ / ⊕**: this manual / Mini (one line) / back to Full. Mini shows the bars with their percent inside, the last turn as a pill coloured by whichever of Cost and Context is worse (a dotted border for amber, dashed for red), and the cache clock.', '')
@@ -322,7 +336,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
 
   L.push('## Limit audit', '')
   L.push('Anthropic does not say how much work a 5H or 7D window holds. The **ledger** keeps one row per finished window, forever, so a shrinking limit shows up as a drop in **work units per 1%**. `/manapool export` writes it as a CSV (`~/Documents/Mana Pool/manapool-ledger.csv`).', '')
-  L.push('- **Work units** weigh each token by type and model at API list prices, 1 unit = one Sonnet input token. Raw token counts mislead: a cache-read token costs about 1/50 of an output token, so light work in a long session looks huge in raw tokens. The ledger always uses plain list weights, so rows stay comparable even when the cost weights below are re-fitted.')
+  L.push('- **Work units** weigh each token by type and model at API list prices for the exact model version, 1 unit = one Sonnet 5.5 input token. Raw token counts mislead: a cache-read token costs 1/50 to 1/200 of an output token, so light work in a long session looks huge in raw tokens. The ledger always uses plain list weights, so rows stay comparable even when the cost weights below are re-fitted.')
   L.push('- **Outside use**: points the meter moved with almost no work on this computer behind them (under a quarter of a usual point). Claude.ai chat and the phone app\'s own chats share the limit but write nothing here, so this flags them; it cannot measure them. Remote Control sessions run on this computer and are counted.')
   L.push('- **Meter** is the last reading seen in that window. If no session was open near its end, the true final figure may be a little higher.', '')
   if (ledger.length === 0) {
@@ -389,8 +403,11 @@ type IO = {
   model: () => Promise<string>
   now: () => Promise<number>
   scan: (args: string[], stdin: string) => Promise<RunResult>
+  id: () => Promise<string>
   get: (k: string) => Promise<unknown>
   set: (k: string, val: unknown) => Promise<void>
+  keys: () => Promise<string[]>
+  del: (k: string) => Promise<void>
   show: (fn: (v: View | null) => View | null) => Promise<void>
   toast: (text: string) => void
   notify: (text: string) => Promise<any>
@@ -408,7 +425,9 @@ export const register: Register = on => {
   let sid = ''
   let turnRunning = false // one of your turns is running (not a subagent's)
   let compactAt: number | undefined
+  let compactOff = false  // auto-compact is switched off: no auto-compact estimates at all
   let compactAtRead = 0
+  let pruned = 0          // when old per-session entries were last cleared out
   let alerts: AlertState | undefined
 
   // Refresh soon after an event, once the transcript is on disk (it lags a
@@ -498,6 +517,10 @@ export const register: Register = on => {
     spinning = true
     await io.show(v => (v ? { ...v, refreshing: true } : v))
     try {
+      // `/clear` starts a new conversation under a new session id without a
+      // new session.start, so the id is read again on every refresh.
+      const cur = await io.id().catch(() => sid)
+      if (cur && cur !== sid) { sid = cur; alerts = undefined }
       const usage = await io.usage()
       const model = await io.model().catch(() => '')
       const ctx = usage.context?.tokens ? { tokens: usage.context.tokens as number, window: (usage.context.window as number) || 0, percent: usage.context.percent as number | undefined } : undefined
@@ -509,13 +532,13 @@ export const register: Register = on => {
         compactAtRead = nowMs
         try {
           const b = (await io.usageBreak())?.context?.breakdown
-          if (b && b.isAutoCompactEnabled !== false && b.autoCompactThreshold) compactAt = b.autoCompactThreshold
-          else if (b && b.isAutoCompactEnabled === false) compactAt = 0
+          if (b && b.isAutoCompactEnabled === false) { compactOff = true; compactAt = undefined }
+          else if (b) { compactOff = false; if (b.autoCompactThreshold) compactAt = b.autoCompactThreshold }
         } catch { /* keep the last figure */ }
       }
       const limits = ((usage.rateLimits ?? []) as { kind: string; percentUsed: number; resetsAt?: string }[]).filter(r => SPAN[r.kind])
       if (limits.length === 0) {
-        await io.show(v => ({ ...(v ?? { samples: [], updatedAt: now }), wins: [], updatedAt: now, ctx, model, error: 'No limit data yet (needs a subscription session with a reply sent).' } as View))
+        await io.show(v => ({ ...(v ?? { samples: [], updatedAt: now }), wins: [], updatedAt: now, ctx, model, refreshing: false, error: 'No limit data yet (needs a subscription session with a reply sent).' } as View))
         return
       }
       const starts = limits.map(r => (r.resetsAt ? Math.floor(Date.parse(r.resetsAt) / 1000) - SPAN[r.kind] : now - SPAN[r.kind]))
@@ -532,18 +555,22 @@ export const register: Register = on => {
       const run = await io.scan(args, JSON.stringify({ samples, ledger }))
       if (run.exitCode !== 0) throw new Error(run.stderr.slice(-300))
       const sums = JSON.parse(run.stdout)
-      // First run of v3: take over v2's tick log (scan.py read it, read-only).
-      if (samples.length === 0 && Array.isArray(sums._imported)) samples = clean(sums._imported as Sample[])
+      // Every open session shares the tick log and the ledger, and a scan takes
+      // a second or two.  Another session may have saved newer readings
+      // meanwhile, so read both again right before writing and merge, instead
+      // of overwriting them with this session's older copy.
       if (Array.isArray(sums._ledgerNew) && sums._ledgerNew.length) {
+        ledger = ((await io.get('ledger')) ?? []) as LedgerRow[]
         const have = new Set(ledger.map(r => `${r.kind}|${r.resetsAt}`))
         const add = (sums._ledgerNew as LedgerRow[]).filter(r => !have.has(`${r.kind}|${r.resetsAt}`))
         if (add.length) {
-          ledger = [...ledger, ...add]
-          await io.set('ledger', ledger) // kept forever
+          ledger = [...ledger, ...add].slice(-MAX_LEDGER) // kept for years: 3000 windows
+          await io.set('ledger', ledger)
         }
       }
       const wins: Win[] = limits.map((r, i) => ({ kind: r.kind, pct: r.percentUsed, resetsAt: r.resetsAt, tokens: sums[String(starts[i])] }))
       // The tick log: "at X% the window held Y units", kept across sessions.
+      samples = clean([...(((await io.get('samples')) ?? []) as Sample[]), ...samples])
       for (const w of wins) {
         const prev = [...samples].reverse().find(s => s.kind === w.kind && s.resetsAt === w.resetsAt)
         if (!prev || w.pct > prev.pct) {
@@ -553,7 +580,8 @@ export const register: Register = on => {
           samples.push({ at: now, kind: w.kind, pct: w.pct, lu: t.listUnits, fresh: t.input + t.output + t.cache_write, resetsAt: w.resetsAt, mix: [t.input, t.output, t.cache_write, t.cache_read], models })
         }
       }
-      samples = samples.slice(-3000)
+      // Older than 30 days is no use: the transcripts behind it are gone.
+      samples = samples.filter(s => s.at >= now - 30 * 86400).slice(-MAX_SAMPLES)
       await io.set('samples', samples)
       // % of the 5H limit per work unit: trusted from 3% into the window,
       // carried over from the last window before that.
@@ -564,7 +592,8 @@ export const register: Register = on => {
       if (fresh5) await io.set('rate', fresh5)
       const nv: View = {
         wins, samples, updatedAt: now, ctx, model, rate,
-        compactAt: compactAt || sums._compactAt || undefined,
+        // auto-compact switched off: no trigger point, so no "auto-compact in N turns"
+        compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
         session: sums._session ?? undefined, weights: sums._weights, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
       }
@@ -573,6 +602,26 @@ export const register: Register = on => {
       await io.set('last', { ...nv, samples: [], session: undefined })
       if (sid) await io.set(`ses:${sid}`, { session: nv.session, at: now })
       await runAlerts(io, nv, nowMs)
+      // Once an hour, drop saved entries of sessions not seen for a week (and
+      // all but the newest 40), so the store stays well under its 4 MiB cap.
+      if (nowMs - pruned > 3600e3) {
+        pruned = nowMs
+        try {
+          const keys = await io.keys()
+          const ses: { id: string; at: number }[] = []
+          for (const k of keys.filter(k => k.startsWith('ses:'))) {
+            const e = (await io.get(k)) as { at?: number } | undefined
+            ses.push({ id: k.slice(4), at: e?.at ?? 0 })
+          }
+          ses.sort((a, b) => b.at - a.at)
+          const keep = new Set(ses.filter((e, i) => i < MAX_SESSIONS && e.at * 1000 >= nowMs - KEEP_SESSION_MS).map(e => e.id))
+          if (sid) keep.add(sid)
+          for (const k of keys) {
+            const m = /^(ses|alerts):(.+)$/.exec(k)
+            if (m && !keep.has(m[2])) await io.del(k)
+          }
+        } catch { /* pruning is best effort */ }
+      }
     } catch (err) {
       await io.show(v => ({ ...(v ?? { wins: [], samples: [], updatedAt: 0 }), refreshing: false, error: String(err) } as View))
     } finally {
@@ -583,7 +632,8 @@ export const register: Register = on => {
   }
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: CMD, description: 'Mana Pool: limit runway, turn cost, hand-off advice and the limit audit' })
+    // A failure here must not stop the band loading.
+    await $.command.register({ name: CMD, description: 'Mana Pool: limit runway, turn cost, hand-off advice and the limit audit' }).catch(() => undefined)
     sid = await $.session.id().catch(() => '')
     alerts = undefined
     // Load stamp: which build is running, so a reload can be confirmed from the store.
@@ -596,6 +646,9 @@ export const register: Register = on => {
       scan: (args, stdin) => $.process.run(['python3', `${$.plugin.root}/hooks/scan.py`, ...args], { stdin, timeoutMs: 120000 }),
       get: k => $.store.get(k),
       set: (k, val) => $.store.set(k, val as any),
+      keys: () => $.store.keys(),
+      del: k => $.store.delete(k),
+      id: () => $.session.id(),
       show: fn => update($, view, fn as any),
       toast: text => $.ui.toast(`Mana Pool · ${text}`, { timeoutMs: 8000 }),
       notify: text => $.ui.notify(text, { title: 'Mana Pool' }),
@@ -662,6 +715,23 @@ export const register: Register = on => {
     return { text: summaryText(v, last, await $.clock.now()) }
   })
 
+  // `/clear` ends this conversation and the process goes on under a new
+  // session id (no new session.start).  The old reply time and turn history
+  // belong to the old conversation, so forget them and re-read at once; the
+  // refresh picks up the new id.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      turnRunning = false
+      alerts = undefined
+      await update($, lastReply, () => null).catch(() => undefined)
+      await update($, busyAtom, () => false).catch(() => undefined)
+      await update($, view, v => (v ? { ...v, session: undefined } : v) as any).catch(() => undefined)
+      dirty = true
+      soon(ms => $.clock.sleep(ms), () => $.clock.now())
+    }
+    return next(e)
+  })
+
   // A limit moved a whole point, or the context changed: refresh soon.
   on('session.measure', async ($, e, next) => {
     dirty = true
@@ -701,6 +771,13 @@ export const register: Register = on => {
     const { Box, Text, Button, Svg } = $.ui.resolve(e) as any
     const FR = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
     if (v.wins.length === 0) {
+      // A failed first read used to leave the band hidden: show why instead.
+      if (!v.refreshing && v.error) return (
+        <Box paddingX={1}>
+          <Text size="body" weight="semibold">Mana Pool</Text>
+          <Text size="caption" color={v.error.startsWith('No limit data') ? DIM : RED} wrap="truncate">  {v.error.slice(0, 160)}</Text>
+        </Box>
+      )
       if (!v.refreshing) return next(e)
       return (
         <Box paddingX={1}>
@@ -825,7 +902,7 @@ export const register: Register = on => {
             {d.idle !== null ? (
               <Box marginLeft={2} flexShrink={0} alignItems="center">
                 <Text {...lab} wrap="truncate">Cache </Text>
-                <Text {...ft} color={d.warm ? '#f6b26b' : '#7fb2ff'}>{d.warm ? dur(TTL_MS - d.idle) : 'Expired'}</Text>
+                <Text {...ft} color={d.warm ? '#f6b26b' : '#7fb2ff'}>{d.warm ? dur(TTL_MS - d.idle) : d.otherModel ? 'Cold' : 'Expired'}</Text>
               </Box>
             ) : null}
           </Box>
@@ -992,7 +1069,7 @@ export const register: Register = on => {
         <Box>
           {Lab('Cache')}
           <Text>
-            <Text size="footnote" color={d.idle === null ? DIM : d.warm ? '#f6b26b' : '#7fb2ff'}>{d.idle === null ? 'No reply yet' : d.warm ? 'Active' : 'Expired'}</Text>
+            <Text size="footnote" color={d.idle === null ? DIM : d.warm ? '#f6b26b' : '#7fb2ff'}>{d.idle === null ? 'No reply yet' : d.warm ? 'Active' : d.otherModel ? 'Model changed' : 'Expired'}</Text>
             <Text {...fn}>
               {d.idle === null ? '' : d.warm
                 ? ` · expires in ${dur(TTL_MS - d.idle)} · after that, next message costs +${P(d.reloadU)} to re-cache`

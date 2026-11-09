@@ -1,5 +1,13 @@
 {
   "name": "manapool",
-  "owner": { "name": "aegisnir" },
-  "plugins": [{ "name": "manapool", "source": "./" }]
+  "owner": {
+    "name": "aegisnir"
+  },
+  "description": "Mana Pool: the real tokens behind Claude Code's 5-hour and weekly limits.",
+  "plugins": [
+    {
+      "name": "manapool",
+      "source": "./"
+    }
+  ]
 }
