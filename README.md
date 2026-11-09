@@ -71,3 +71,7 @@ It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token co
 - `hooks/register.tsx`: the mod (band, pane, estimates, alerts)
 - `hooks/scan.py`: reads the transcripts, adds up tokens, fits weights, writes the CSV export
 - `types/index.d.ts`: the mod's saved-state contract
+
+## License
+
+MIT. See `LICENSE`.
