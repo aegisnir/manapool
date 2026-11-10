@@ -8,6 +8,8 @@ All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/p
 - **Daily history file.**  The scanner keeps `history.json` in its data folder: one row per local day (work per model, per project folder name, per hour, cache-read share), kept 400 days.  Days the normal scan covers are rebuilt each scan; older days come from a one-time read of every transcript, run in the background the first time.
 - One colour per model (Opus, Sonnet, Fable, Mythos, Haiku, plus grey for anything else), checked as a set for colour-blind separation.
 - The scan cache records each transcript's folder, so it is rebuilt once after updating.
+- Charts are drawn at the pane's own width, so they line up with the tiles.
+- README and manual: History charts, their assumptions, and the ▤ button.
 
 ## 0.3.7 (2026-11-09)
 
