@@ -33,10 +33,10 @@ has no way to do that safely).
 
 Units: "work units" weigh each token by type and model, so a cheap cache read
 does not count like an expensive output token.  1 unit = one Sonnet input
-token at list price.  The weights start at API list prices and switch to
-weights fitted from your own meter ticks once there are enough clean ticks.
+token at list price.  The weights start at API list prices and move toward
+what your own meter ticks measure, a little more with every tick.
 """
-import csv, glob, hashlib, json, os, re, sys, time
+import csv, glob, hashlib, json, math, os, re, sys, time
 
 # File locking: fcntl on macOS and Linux, msvcrt on Windows.
 try:
@@ -795,22 +795,6 @@ if len(usable) >= 15:
             K[3] = x[2] / x[0]
             fit["source"] = "fit"
             fit["K"] = [round(v, 4) for v in K]
-# Model multipliers: ticks done (85%+) on one model, compared with the rest.
-rates = []
-per_model_rates = {k: [] for k in MODELS}
-for dp, x, pm, a, b in usable:
-    tot = sum(pm.values())
-    if tot <= 0:
-        continue
-    u = x[0] * K[1] + x[1] * K[2] + x[2] * K[3]
-    if u <= 0:
-        continue
-    rates.append(dp / u)
-    for k, v in pm.items():
-        if v / tot >= 0.85:
-            per_model_rates[k].append(dp / u)
-
-
 def median(a):
     a = sorted(a)
     if not a:
@@ -819,21 +803,106 @@ def median(a):
     return a[n // 2] if n % 2 else (a[n // 2 - 1] + a[n // 2]) / 2
 
 
-# A model's own multiplier is used only with 8+ ticks on it whose spread is
-# tight (middle half within 60% of the median); otherwise it stays at list.
-fit["measured"] = {}
-mid = median(rates) if len(rates) >= 15 else 0
-for k in MODELS:
-    rk = sorted(per_model_rates[k])
-    fit["model_ticks"][k] = len(rk)
-    if not rk or mid <= 0:
+# ---------------------------------------------------------------------------
+# Model multipliers: how much each model moves the 5H meter per list-price
+# unit, relative to your average tick (1.0x = what its list price says).
+# Self-correcting, so it gets better on its own as ticks come in:
+# - Pooled, not per tick.  A model's rate is all its meter movement divided by
+#   all its work, over ticks done 85%+ on that model.  One tick carries up to
+#   a reply of slop, so single ticks scatter widely (a fast model like Fable
+#   ticks every 1 to 3 minutes); adding them up averages that out.
+# - Blended toward list price while the evidence is thin.  The measured value
+#   is pulled toward 1.0x by how uncertain it is (starting belief: within
+#   about 2x of list).  More ticks, less uncertainty, closer to the measured
+#   value.  No on/off threshold, so nothing jumps.
+# - Recent ticks count more (30-day half-life), so if Anthropic changes how
+#   the plan weighs a model, the estimate follows within weeks.
+# - Ticks are kept in ticks.json for 180 days, so the estimate survives
+#   Claude Code deleting transcripts after about 30 days.
+# Measured on list-price units (the token-type weights K are not applied).
+# ---------------------------------------------------------------------------
+TICKS_FILE = os.path.join(data_dir, "ticks.json") if data_dir else ""
+TICK_V = 1
+TICK_KEEP_DAYS = 180
+HALF_LIFE_DAYS = 30
+PRIOR_SD = math.log(2)   # starting belief: a model's weight is within ~2x of list
+TICK_SD_FLOOR = 0.4      # a single tick is at least ~40% off (one reply of slop)
+DOMINANT = 0.85          # a tick counts for a model when 85%+ of its work was on it
+
+
+def tick_merge(fresh):
+    """Fold this scan's ticks into ticks.json under the shared lock.  A tick
+    this scan rebuilt (its transcripts still exist) replaces the stored copy;
+    older ones come from the file.  Returns every kept tick as
+    [start, end, % moved, {model: list units}]."""
+    rows = {f"{a:.3f}|{b:.3f}": [a, b, dp, {k: round(v, 1) for k, v in pm.items()}] for dp, x, pm, a, b in fresh}
+    if not TICKS_FILE:
+        return sorted(rows.values())
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        with open(LOCK_FILE, "a+") as lk:
+            lock(lk)
+            try:
+                try:
+                    with open(TICKS_FILE) as f:
+                        got = json.load(f)
+                    if got.get("v") != TICK_V:
+                        got = {}
+                except Exception:
+                    got = {}
+                kept = {f"{t[0]:.3f}|{t[1]:.3f}": t for t in got.get("ticks") or [] if len(t) == 4}
+                kept.update(rows)
+                floor_ = now - TICK_KEEP_DAYS * 86400
+                out = sorted(t for t in kept.values() if t[1] >= floor_)
+                tmp = f"{TICKS_FILE}.{os.getpid()}.tmp"
+                with open(tmp, "w") as f:
+                    f.write(json.dumps({"v": TICK_V, "ticks": out}, separators=(",", ":")))
+                os.replace(tmp, TICKS_FILE)
+                return out
+            finally:
+                unlock(lk)
+    except Exception:
+        return sorted(rows.values())  # a locked or unwritable file: use this scan's ticks
+
+
+all_ticks = tick_merge(usable)
+pool = {k: [] for k in MODELS}  # per model: (weight, % moved, list units)
+ref_y = ref_x = 0.0
+for a, b, dp, pm in all_ticks:
+    tot = sum(pm.values())
+    if tot <= 0 or dp <= 0:
         continue
-    m_ = median(rk) / mid
-    q1, q3 = rk[len(rk) // 4] / mid, rk[(3 * len(rk)) // 4] / mid
-    spread = (q3 - q1) / m_ if m_ > 0 else 9
-    fit["measured"][k] = {"x": round(m_, 3), "ticks": len(rk), "spread": round(spread, 2)}
-    if len(rk) >= 8 and spread <= 0.6:
-        MM[k] = m_
+    wt = 0.5 ** (max(0.0, now - b) / 86400 / HALF_LIFE_DAYS)
+    ref_y += wt * dp
+    ref_x += wt * tot
+    k, v = max(pm.items(), key=lambda kv: kv[1])
+    if k in pool and v / tot >= DOMINANT:
+        pool[k].append((wt, dp, tot))
+ref = ref_y / ref_x if ref_x > 0 else 0.0
+fit["measured"] = {}
+fit["kept"] = len(all_ticks)
+for k in MODELS:
+    rows_ = pool[k]
+    n = len(rows_)
+    fit["model_ticks"][k] = n
+    if n < 3 or ref <= 0:
+        continue  # too few to say anything: list price
+    sy = sum(wt * y for wt, y, x in rows_)
+    sx = sum(wt * x for wt, y, x in rows_)
+    rk = sy / sx
+    if rk <= 0:
+        continue
+    # Uncertainty of the pooled rate (ratio estimator), as a share of it, never
+    # below what n ticks of ~40% slop each can promise.
+    n_eff = sum(wt for wt, y, x in rows_) ** 2 / sum(wt * wt for wt, y, x in rows_)
+    var = sum((wt * (y - rk * x)) ** 2 for wt, y, x in rows_) / sx ** 2 * n / (n - 1)
+    se = max(math.sqrt(var) / rk, TICK_SD_FLOOR / math.sqrt(n_eff))
+    raw = math.log(rk / ref)
+    trust = PRIOR_SD ** 2 / (PRIOR_SD ** 2 + se ** 2)  # 0 = list price, 1 = measured
+    post, post_se = raw * trust, math.sqrt(trust) * se
+    MM[k] = min(4.0, max(0.25, math.exp(post)))
+    fit["measured"][k] = {"x": round(rk / ref, 3), "ticks": n, "used": round(MM[k], 3), "trust": round(trust, 2),
+                          "lo": round(math.exp(post - 1.645 * post_se), 3), "hi": round(math.exp(post + 1.645 * post_se), 3)}
 fit["MM"] = {k: round(v, 3) for k, v in MM.items()}
 if any(v != 1.0 for v in MM.values()):
     fit["source"] = "fit" if fit["source"] == "fit" else "fit-models"

@@ -76,7 +76,7 @@ To update: `/plugin update manapool`. To remove: `/plugin uninstall manapool`, t
 
 ## How the estimates work, and what is a guess
 
-Anthropic does not publish how a subscription weighs different models and token types. Mana Pool starts from **one assumption: your plan weighs things like the API price list.** As real meter ticks build up, it fits the weights from your own usage and uses those instead. Treat the numbers as a guide, not a bill.
+Anthropic does not publish how a subscription weighs different models and token types. Mana Pool starts from **one assumption: your plan weighs things like the API price list.** As real meter ticks build up, it measures how much each model moves your meter and moves the weights toward that, a little more with every tick: thin evidence stays near list price, plenty of it lands on the measured value. Recent ticks count more, so it follows changes to your plan. The manual shows each model's measured weight, the weight in use and its 90% range. Treat the numbers as a guide, not a bill.
 
 - Measured: token counts, replies, cache timing, conversation size, whole-number percents.
 - Estimated (marked `~`): the hundredths, every per-turn and per-model cost, the runway.
@@ -89,7 +89,7 @@ List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row 
 
 ## Privacy
 
-It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts, times, model names and message ids (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` if you set it): `samples.jsonl` (the tick log), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines) and `history.json` (one row per day for the History pane: work per model, per hour, and per project, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
+It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts, times, model names and message ids (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` if you set it): `samples.jsonl` (the tick log), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines), `ticks.json` (each meter tick's percent and work per model, kept 180 days so the model weights outlive deleted transcripts) and `history.json` (one row per day for the History pane: work per model, per hour, and per project, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
 
 ## Files
 

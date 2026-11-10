@@ -2,6 +2,12 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## 0.5.0 (2026-11-09)
+
+- **Self-correcting model weights.**  Each model's weight comes from all its ticks added up, not a tick-by-tick check that fast models such as Fable always failed (one tick carries up to a reply of slop).  The weight in use starts at list price and moves toward the measured value as ticks build up, with no on/off threshold.  Recent ticks count more (30-day half-life), so a change in how a plan weighs a model shows up within weeks.
+- **`ticks.json`** in the data folder keeps every tick's percent and work per model for 180 days, so the weights outlive transcripts Claude Code deletes.
+- The manual's model table shows Measured, Ticks, Used in costs and a 90% range.
+
 ## 0.4.0 (2026-11-09)
 
 - **History pane.**  The ▤ button on the band (or `/manapool history`) opens charts over 7, 30 or 90 days: daily work stacked by model, this 5H window's pace against the middle half of past windows, work per 1% of 5H per finished window, top projects, a weekday-by-hour heatmap, and the share spent re-reading the conversation.  Bars use the band's gradient; every chart has hover numbers and a text description.
