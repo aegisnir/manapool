@@ -9,6 +9,7 @@ All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/p
 - One colour per model (Opus, Sonnet, Fable, Mythos, Haiku, plus grey for anything else), checked as a set for colour-blind separation.
 - The scan cache records each transcript's folder, so it is rebuilt once after updating.
 - Charts are drawn at the pane's own width, so they line up with the tiles.
+- Mythos is no longer priced as Fable: like any model without a price row it is left out and listed in the manual until its price is added.
 - README and manual: History charts, their assumptions, and the ▤ button.
 
 ## 0.3.7 (2026-11-09)

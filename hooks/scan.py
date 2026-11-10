@@ -188,7 +188,13 @@ HANDOFF_NOTE_OUT = 3000
 
 def key_of(model):
     m = (model or "").lower()
-    if "fable" in m or "mythos" in m:
+    # Mythos has no list price yet: it is left out and listed, like any
+    # unknown model, never priced as Fable.  When its price is published, add
+    # ("mythos", <version>) rows to PRICES, "mythos" to NEWEST and MODELS, and
+    # return "mythos" here.
+    if "mythos" in m:
+        return ""
+    if "fable" in m:
         return "fable"
     if "opus" in m:
         return "opus"
@@ -477,8 +483,7 @@ def proj_of(cwd):
 
 
 def show_of(model):
-    """The model's name in the History pane.  Mythos is priced as Fable's
-    family (key_of) but drawn on its own."""
+    """The model's name in the History pane (its own colour per name)."""
     m = (model or "").lower()
     return "mythos" if "mythos" in m else (key_of(m) or "other")
 
