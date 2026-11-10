@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.9' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.10' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -662,7 +662,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Cache**: the prompt cache clock. **Active** means the conversation is still in the prompt cache, so the next message reads it cheaply (a *cache read*). An hour after the last reply the cache **expires**, and the next message here costs extra to re-cache the whole conversation (a *cache write*), once. A cache belongs to one model: after switching models it shows **Model changed**, and the next message pays that re-cache too.')
   L.push('- **Limit check** (once past windows are recorded): how much work 1% of your 5H limit buys in this window compared with your usual. **Normal** within 15% of usual; red when it buys 15%+ less (a shrinking limit), or when the meter moved with no Claude Code use on this computer (**used outside Claude Code**: claude.ai chat or the phone app). "Work" is your usage weighted by token type and model; see "Limit audit".')
   L.push('- **Other models**: one column for each model you are not on, and two ways to move to it, each shown as a one-time cost, then the cost per turn after it. **Switch now**: this session changes model, so the whole conversation is cached on the new model once, and every later turn still re-reads it. **Hand off**: write a hand-off note here and start a new session on that model; it caches only its small start, and its turns carry no old conversation. Per-turn costs are your last 3 turns re-priced on that model (assuming it would use the same tokens: Fable tends to think more, Haiku to write less). Green marks the cheaper path over the next 5 turns. As a session grows, switch now gets dearer and hand off wins.')
-  L.push('- **ⓘ / ⊖ / ⊕**: this manual / Mini (one line) / back to Full. Mini shows the bars with their percent inside, the last turn as a pill coloured by whichever of Cost and Context is worse (a dotted border for amber, dashed for red), and the cache clock.', '')
+  L.push('- **▤ / ⓘ / ⊖ / ⊕**: the History pane / this manual / Mini (one line) / back to Full. Mini shows the bars with their percent inside, the last turn as a pill coloured by whichever of Cost and Context is worse (a dotted border for amber, dashed for red), and the cache clock.', '')
 
   L.push('## The pills', '')
   L.push('| Pill | Green | Blue | Amber | Red |', '|---|---|---|---|---|')
@@ -714,12 +714,14 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   }
   const fit = v?.fit
   L.push('## History pane', '')
-  L.push('The ▤ button (or `/manapool history`) opens charts of past use over 7, 30 or 90 days. Hover a bar or cell for its numbers.')
+  L.push('The ▤ button (or `/manapool history`) opens charts of past use over 7, 30 or 90 days. Hover a bar, dot or cell for its numbers. Each model keeps one colour everywhere: Opus violet, Sonnet blue, Fable gold, Mythos orange, Haiku teal, grey for any other.')
+  L.push('- **Tiles**: **7D used**; **Per day left**, what is left of 7D spread evenly over the days until it resets; **Re-reading**, the share of the last 7 days spent re-reading the conversation.')
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading).')
   L.push('- **5H pace**: this window\'s readings against the middle half of your past windows, with the projection to 100%.')
   L.push('- **Limit size**: work per 1% of 5H, one dot per finished window. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
-  L.push('- **Projects**: work by the folder a session ran in. **Hours**: work by weekday and hour, local time.')
+  L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
   L.push('- **Re-reading**: the share of work spent on cache reads, the old conversation sent again on every call. (The turn strip on the band counts a turn\'s re-reading more exactly.)')
+  L.push('- Work here is weighed at plain list prices, like the ledger, so days stay comparable when the fitted weights change.')
   L.push('- Older days come from a one-time read of every transcript the first time the pane has data; Claude Code deletes old transcripts, so `history.json` is where they survive.', '')
   L.push('## Model cost on your own meter', '')
   if (fit) {

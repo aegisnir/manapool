@@ -10,6 +10,8 @@ It answers three questions, in this order:
 2. **Is this session still the cheap place to work?** What each turn costs here, against handing off to a fresh session.
 3. **Is the limit holding the usual amount of work?** A ledger of past windows that shows a shrinking limit.
 
+And a History pane for the question after that: **where did the work go?**
+
 ## What you get
 
 A band above the prompt, in two sizes (Full and Mini):
@@ -25,9 +27,22 @@ A band above the prompt, in two sizes (Full and Mini):
 | Limit check | Whether 1% of 5H buys the usual amount of work. Flags meter movement with no Claude Code use behind it. |
 | Other models | One-time and per-turn cost of switching model now, or handing off to a new session on that model. |
 
+A **History** pane (the ▤ button on the band, or `/manapool history`), over 7, 30 or 90 days:
+
+| Chart | Shows |
+|-------|-------|
+| Tiles | 7D used, how much of 7D is left per day until it resets, and the share of the last 7 days spent re-reading. |
+| Daily | Work per day, stacked by model, in % of 7D. |
+| 5H pace | This window against the middle half of your past windows, with a projection to 100%. |
+| Limit size | Work per 1% of 5H, one dot per finished window. A falling line is a shrinking limit. |
+| Projects | Work by the folder each session ran in. |
+| Hours | Work by weekday and hour of day. |
+| Re-reading | Per day, the work spent re-reading the conversation against new work. |
+
+Hover a bar, dot or cell for its numbers. Each model keeps one colour everywhere (Opus, Sonnet, Fable, Mythos, Haiku, grey for any other), chosen to stay distinct for colour-blind readers. Charts draw in the desktop app and VS Code; the terminal shows the key numbers as text.
+
 Plus:
 
-- A **History** pane (the ▤ button, or `/manapool history`) with charts over 7, 30 or 90 days: work per day by model, this 5H window's pace against your usual, the limit's size per window, work by project and by hour, and how much of it went to re-reading the conversation.  Hover a bar for its numbers.
 - A user manual in a side pane (the info icon) with every formula, assumption and your live numbers.
 - `/manapool` opens the manual and prints the key numbers as plain text, for surfaces that cannot draw the band (a phone, for example).
 - `/manapool export` writes the window ledger to `~/Documents/Mana Pool/manapool-ledger.csv`.
@@ -67,6 +82,7 @@ Anthropic does not publish how a subscription weighs different models and token 
 - Estimated (marked `~`): the hundredths, every per-turn and per-model cost, the runway.
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
 - Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed.
+- History: work is weighed at plain list prices (the ledger's fixed yardstick), and turned into % of 7D with the current 7D window's work per 1%. Re-reading counts cache reads. Days and hours are local time. Over 30 or 90 days a project can pass 100%: that is more than one week's limit.
 - It only sees Claude Code on the computer it runs on. Chat on claude.ai, other computers and the phone app also move the meter but are not counted (the Limit check can flag them, not measure them).
 
 List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row per model version (Haiku 5.5's long-prompt price is in `LONG`). Update them when prices change.
@@ -77,8 +93,8 @@ It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token co
 
 ## Files
 
-- `hooks/register.tsx`: the mod (band, pane, estimates, alerts)
-- `hooks/scan.py`: reads the transcripts, adds up tokens, fits weights, writes the CSV export
+- `hooks/register.tsx`: the mod (band, manual and History panes, estimates, alerts)
+- `hooks/scan.py`: reads the transcripts, adds up tokens, fits weights, keeps the daily history, writes the CSV export
 - `types/index.d.ts`: the mod's saved-state contract
 - `tests/test_scan.py`: tests of the scanner on synthetic transcripts. Run `python3 tests/test_scan.py`.
 - `CHANGELOG.md`: what changed in each version
