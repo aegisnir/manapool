@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.10' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.11' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -53,7 +53,8 @@ const pctTxt = (x: number) => (x < 0.005 ? '<0.01%' : x < 0.1 ? `${x.toFixed(2)}
 const cap = (k: string) => k.charAt(0).toUpperCase() + k.slice(1)
 const keyOf = (id: string) => {
   const m = (id || '').toLowerCase()
-  return m.includes('fable') || m.includes('mythos') ? 'fable' : m.includes('opus') ? 'opus' : m.includes('haiku') ? 'haiku' : m.includes('sonnet') ? 'sonnet' : ''
+  // Mythos has no list price yet: unpriced like any unknown model (see scan.py key_of).
+  return m.includes('mythos') ? '' : m.includes('fable') ? 'fable' : m.includes('opus') ? 'opus' : m.includes('haiku') ? 'haiku' : m.includes('sonnet') ? 'sonnet' : ''
 }
 // "claude-haiku-4-5-20251001" -> "4.5" (same rule as scan.py's ver_of)
 const verOf = (id: string) => {

@@ -81,7 +81,7 @@ Anthropic does not publish how a subscription weighs different models and token 
 - Measured: token counts, replies, cache timing, conversation size, whole-number percents.
 - Estimated (marked `~`): the hundredths, every per-turn and per-model cost, the runway.
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
-- Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed.
+- Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed (Mythos too, until its price is added).
 - History: work is weighed at plain list prices (the ledger's fixed yardstick), and turned into % of 7D with the current 7D window's work per 1%. Re-reading counts cache reads. Days and hours are local time. Over 30 or 90 days a project can pass 100%: that is more than one week's limit.
 - It only sees Claude Code on the computer it runs on. Chat on claude.ai, other computers and the phone app also move the meter but are not counted (the Limit check can flag them, not measure them).
 
