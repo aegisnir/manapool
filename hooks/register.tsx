@@ -6,11 +6,14 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.7' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.8' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
 const busyAtom = atom({ plugin: 'manapool', key: 'busy' } as const, false, { shape: 'busy-3' })
+const rangeAtom = atom({ plugin: 'manapool', key: 'range' } as const, 30, { shape: 'range-1' })
+// The History pane's id.
+const HPANE = `${PANE}-history`
 
 const SPAN: Record<string, number> = { five_hour: 5 * 3600, seven_day: 7 * 86400 }
 // The prompt cache keeps the conversation for an hour after each reply
@@ -293,6 +296,352 @@ const summaryText = (v: View, last: number | null, now: number): string => {
 }
 
 // ---------------------------------------------------------------------------
+// History pane.  Charts from the daily history (scan.py keeps it in
+// history.json), the tick log and the ledger.  Each chart is one SVG string,
+// drawn on its own dark card so it reads the same in any app theme.
+// Pure: no `$`.
+// ---------------------------------------------------------------------------
+type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number }
+// One colour per model, fixed: a colour follows its model, never its rank.
+// Checked as a set of six on every pair against the card (#262626) with the
+// dataviz validator: colour-blind dE >= 10.8, normal vision dE >= 20.
+const MODEL_COL: Record<string, string> = {
+  opus: '#8d7cd5', sonnet: '#a8ceff', fable: '#eac75e', mythos: '#d17746', haiku: '#16b09b', other: '#5f5f5f',
+}
+const MODEL_ORDER = ['opus', 'sonnet', 'fable', 'mythos', 'haiku', 'other'] // bottom of a stack first
+const GRID = '#3a3a3a'
+const INK = '#ececec'
+const EMPTY = '#2f2f2f'   // a heatmap cell with no work
+const HW = 408            // chart width; the pane scales it down to fit
+const FONT = `font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"`
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const pad2 = (n: number) => String(n).padStart(2, '0')
+const keyOfDay = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+const dayOfKey = (k: string) => new Date(`${k}T12:00:00`)
+const shortDay = (k: string) => dayOfKey(k).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+const hourTxt = (h: number) => (h === 0 ? '12 AM' : h === 12 ? '12 PM' : h > 12 ? `${h - 12} PM` : `${h} AM`)
+const quant = (a: number[], q: number) => {
+  if (a.length === 0) return 0
+  const s = [...a].sort((x, y) => x - y)
+  const i = (s.length - 1) * q, lo = Math.floor(i), hi = Math.ceil(i)
+  return s[lo] + (s[hi] - s[lo]) * (i - lo)
+}
+// A round axis top: 1, 2, 2.5 or 5 times a power of ten.
+const niceMax = (x: number) => {
+  if (!(x > 0)) return 1
+  const p = 10 ** Math.floor(Math.log10(x))
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= x) return m * p
+  return 10 * p
+}
+// hex -> OKLCH, the inverse of hexOk (same published matrices)
+const okOf = (hex: string): Ok => {
+  const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
+  const [r, g, b] = rgb(hex).map(v => lin(v / 255))
+  const l = Math.cbrt(0.4122214708 * r + 0.5363329551 * g + 0.0514459929 * b)
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+  const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s
+  const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s
+  const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+  return [L, Math.hypot(A, B), (Math.atan2(B, A) * 180) / Math.PI]
+}
+// The band's gradient on any colour: a deeper, slightly hue-turned base
+// running to a lighter tip.  Vertical bars grow upward, so their base is the bottom.
+const gradDef = (id: string, hex: string, vertical: boolean) => {
+  const o = okOf(hex)
+  const dir = vertical ? 'x1="0" x2="0" y1="1" y2="0"' : 'x1="0" x2="1" y1="0" y2="0"'
+  return `<linearGradient id="${id}" ${dir}><stop offset="0" stop-color="${hexOk(shiftStart(o))}"/><stop offset="1" stop-color="${hexOk(shiftEnd(o))}"/></linearGradient>`
+}
+const svgDoc = (h: number, body: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${HW + 16} ${h + 16}" width="${HW + 16}" height="${h + 16}">` +
+  `<rect width="${HW + 16}" height="${h + 16}" rx="10" fill="${SURFACE}"/><g transform="translate(8 8)" ${FONT} font-size="10">${body}</g></svg>`
+const label = (x: number, y: number, s: string, anchor = 'start', col = DIM) =>
+  `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${col}">${esc(s)}</text>`
+const gridLine = (x0: number, y: number, s: string) =>
+  `<line x1="${x0}" x2="${HW}" y1="${y}" y2="${y}" stroke="${GRID}"/>${label(x0 - 4, y + 3, s, 'end')}`
+// A bar grown up from the baseline: top corners rounded, bottom flat.
+const upBar = (x: number, y: number, w: number, h: number, fill: string) => {
+  const r = Math.min(3, w / 2, h)
+  return `<path d="M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z" fill="${fill}"/>`
+}
+// A bar grown right from the axis: only its data end rounded.
+const rightBar = (x: number, y: number, w: number, h: number, fill: string) => {
+  const r = Math.min(4, h / 2, w)
+  return `<path d="M${x},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h - r} Q${x + w},${y + h} ${x + w - r},${y + h} H${x} Z" fill="${fill}"/>`
+}
+
+type HistRange = 7 | 30 | 90
+type Chart = { svg: string; alt: string; right?: string; rightBad?: boolean; legend?: { name: string; col: string }[]; note?: string }
+type HistView = {
+  ok: boolean; full: boolean; unit: string
+  tiles: { svg: string; alt: string } | null
+  daily: Chart | null; pace: Chart | null; limit: Chart | null; projects: Chart | null; hours: Chart | null; reread: Chart | null
+  text: string[]  // the same, as plain lines, for a surface without Svg
+}
+
+const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: number | null, now: number): HistView => {
+  const hist = v.history
+  const D = hist?.days ?? {}
+  const today = new Date(now)
+  const keys: string[] = []
+  for (let i = range - 1; i >= 0; i--) keys.push(keyOfDay(new Date(today.getFullYear(), today.getMonth(), today.getDate() - i)))
+  const dayTotal = (b?: HistDay) => (b ? Object.values(b.m).reduce((a, x) => a + x, 0) : 0)
+
+  // Work units -> % of the 7D limit: the current 7D window's highest reading
+  // (its list units over its percent), else the ledger's finished 7D windows.
+  const w7 = v.wins.find(w => w.kind === 'seven_day')
+  const w5 = v.wins.find(w => w.kind === 'five_hour')
+  const tick7 = v.samples.filter(s => s.kind === 'seven_day' && (s.lu ?? 0) > 0 && s.pct >= 3 && (!w7 || s.resetsAt === w7.resetsAt))
+    .sort((a, b) => b.pct - a.pct)[0]
+  const led7 = ledger.filter(r => r.kind === 'seven_day' && (r.per1 ?? 0) > 0).map(r => r.per1 as number)
+  const per7 = tick7 ? (tick7.lu as number) / tick7.pct : led7.length ? median(led7) : 0
+  const unit = per7 > 0 ? '% of 7D' : 'work units'
+  const val = (u: number) => (per7 > 0 ? u / per7 : u)
+  const valTxt = (u: number) => (per7 > 0 ? pctTxt(val(u)) : fmt(u))
+  const tick = (x: number) => (per7 > 0 ? `${+x.toFixed(1)}%` : fmt(x))
+  const d = derive(v, last, now)
+  const text: string[] = []
+
+  // --- tiles: 7D used (with the band's gradient meter), per day left, re-reading ---
+  let tiles: HistView['tiles'] = null
+  {
+    const tw = (HW - 16) / 3, th = 72
+    // One tile: caption, big value, footnote.  `extra` draws between value and footnote.
+    const box = (i: number, k: string, val_: string, sub: string, extra = '') => {
+      const x = i * (tw + 8)
+      return `<rect x="${x}" y="0" width="${tw}" height="${th}" rx="8" fill="#1f1f1f"/>` +
+        label(x + 10, 16, k) + `<text x="${x + 10}" y="37" fill="${INK}" font-size="18" font-weight="600">${esc(val_)}</text>` +
+        extra + label(x + 10, 63, sub)
+    }
+    const pct7 = w7 ? d.est(w7) : 0
+    const resetMs = w7?.resetsAt ? Date.parse(w7.resetsAt) - now : 0
+    const daysLeft = resetMs / 86400e3
+    const tip = tipOk(pct7)
+    const mw = tw - 20, mx = 10, mf = Math.max(0, Math.min(1, pct7 / 100)) * mw
+    const meter = `<defs><linearGradient id="t7" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="${hexOk(shiftStart(tip))}"/><stop offset="1" stop-color="${hexOk(shiftEnd(tip))}"/></linearGradient></defs>` +
+      `<rect x="${mx}" y="44" width="${mw}" height="4" rx="2" fill="${mix(SURFACE, hexOk(tip), 0.24)}"/>` +
+      (mf > 0 ? `<rect x="${mx}" y="44" width="${Math.max(4, mf)}" height="4" rx="2" fill="url(#t7)"/>` : '')
+    const resetTxt = w7?.resetsAt ? new Date(Date.parse(w7.resetsAt)).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : ''
+    const leftPct = Math.max(0, 100 - pct7)
+    const perDay = daysLeft >= 1 ? leftPct / daysLeft : leftPct
+    const wk = keys.slice(-7).map(k => D[k]).filter(Boolean) as HistDay[]
+    const wkTot = wk.reduce((a, b) => a + dayTotal(b), 0), wkR = wk.reduce((a, b) => a + b.r, 0)
+    const rr = wkTot > 0 ? wkR / wkTot : 0
+    if (w7) {
+      const body = box(0, '7D used', `${Math.round(pct7)}%`, resetTxt ? `Resets ${resetTxt}` : '', meter) +
+        box(1, 'Per day left', `~${perDay < 10 ? perDay.toFixed(1) : Math.round(perDay)}%`, daysLeft >= 1 ? `${daysLeft.toFixed(1)} days to reset` : 'until reset') +
+        box(2, 'Re-reading', `${Math.round(rr * 100)}%`, 'of work, 7 days')
+      tiles = { svg: svgDoc(th, body), alt: `7D used ${Math.round(pct7)}%, about ${perDay.toFixed(1)}% per day left, ${Math.round(rr * 100)}% re-reading` }
+      text.push(`7D ${Math.round(pct7)}% · ~${perDay.toFixed(1)}% per day left · re-reading ${Math.round(rr * 100)}%`)
+    }
+  }
+
+  // --- Daily: stacked bars by model ---
+  let daily: Chart | null = null
+  const present = MODEL_ORDER.filter(m => keys.some(k => (D[k]?.m[m] ?? 0) > 0))
+  {
+    const H = 132, x0 = 34, top = 12, base = H - 16
+    const totals = keys.map(k => dayTotal(D[k]))
+    const max = niceMax(val(Math.max(...totals, 0)) * 1.08)
+    const sy = (x: number) => base - (x / max) * (base - top)
+    const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
+    let out = `<defs>${present.map(m => gradDef(`d${m}`, MODEL_COL[m], true)).join('')}</defs>`
+    out += [0, max / 2, max].map(t => gridLine(x0, sy(t), tick(t))).join('')
+    let peak = -1
+    totals.forEach((t, i) => { if (t > 0 && (peak < 0 || t > totals[peak])) peak = i })
+    keys.forEach((k, i) => {
+      const b = D[k]
+      const x = x0 + i * sx + gap / 2
+      const parts = present.map(m => [m, b?.m[m] ?? 0] as const).filter(p => p[1] > 0)
+      const tip = `${shortDay(k)} · ${valTxt(totals[i])}${parts.length ? ' · ' + parts.map(([m, u]) => `${cap(m)} ${valTxt(u)}`).join(', ') : ''}`
+      let y = base, segs = ''
+      parts.forEach(([m, u], j) => {
+        const h = (val(u) / max) * (base - top)
+        y -= h
+        const isTop = j === parts.length - 1
+        // a 1px surface gap between stacked segments
+        segs += isTop ? upBar(x, y, bw, Math.max(0.5, h - (j > 0 ? 1 : 0)), `url(#d${m})`)
+          : `<rect x="${x}" y="${y + 1}" width="${bw}" height="${Math.max(0.5, h - 1)}" fill="url(#d${m})"/>`
+      })
+      // a full-height hover target, bigger than the bar
+      out += `<g><title>${esc(tip)}</title><rect x="${x0 + i * sx}" y="${top}" width="${sx}" height="${base - top}" fill="transparent"/>${segs}</g>`
+    })
+    if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(totals[peak])) - 4, valTxt(totals[peak]).replace('~', ''), 'middle', INK)
+    const every = Math.ceil(keys.length / 5)
+    keys.forEach((k, i) => { if ((keys.length - 1 - i) % every === 0) out += label(x0 + i * sx + sx / 2, H - 2, shortDay(k), 'middle') })
+    const sum = totals.reduce((a, b) => a + b, 0)
+    daily = {
+      svg: svgDoc(H, out), alt: `Daily work over ${range} days, ${valTxt(sum)} in all`,
+      right: unit === '% of 7D' ? '% of 7D per day' : 'work units per day',
+      legend: present.map(m => ({ name: cap(m), col: MODEL_COL[m] })),
+    }
+    text.push(`Daily (${range}D): ${keys.slice(-7).map(k => `${shortDay(k)} ${valTxt(dayTotal(D[k]))}`).join(' · ')}`)
+  }
+
+  // --- 5H pace: this window against the middle half of past windows ---
+  let pace: Chart | null = null
+  if (w5?.resetsAt) {
+    const H = 124, x0 = 34, top = 8, base = H - 16
+    const sx = (m: number) => x0 + (m / 300) * (HW - x0 - 4), sy = (p: number) => base - (Math.min(100, p) / 100) * (base - top)
+    const byWin = new Map<string, Sample[]>()
+    for (const s of v.samples) if (s.kind === 'five_hour' && s.resetsAt) byWin.set(s.resetsAt, [...(byWin.get(s.resetsAt) ?? []), s])
+    const startOf = (ra: string) => Date.parse(ra) / 1000 - SPAN.five_hour
+    const at = (ss: Sample[], st: number, m: number) => ss.reduce((p, s) => (s.at <= st + m * 60 ? Math.max(p, s.pct) : p), 0)
+    const past = [...byWin.entries()].filter(([ra, ss]) => ra !== w5.resetsAt && Date.parse(ra) <= now && ss.length >= 2 && Math.max(...ss.map(s => s.pct)) >= 2)
+      .sort((a, b) => Date.parse(a[0]) - Date.parse(b[0])).slice(-30)
+    const grid = Array.from({ length: 31 }, (_, i) => i * 10)
+    let out = [0, 50, 100].map(t => gridLine(x0, sy(t), `${t}%`)).join('')
+    const nowMin = Math.max(0, Math.min(300, (now / 1000 - startOf(w5.resetsAt)) / 60))
+    const pctNow = d.est(w5)
+    if (past.length >= 3) {
+      const cols = grid.map(m => past.map(([ra, ss]) => at(ss, startOf(ra), m)))
+      const p25 = cols.map(c => quant(c, 0.25)), p50 = cols.map(c => quant(c, 0.5)), p75 = cols.map(c => quant(c, 0.75))
+      out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p75[i])}`).join(' L')} L${[...grid].reverse().map((m, i) => `${sx(m)},${sy(p25[grid.length - 1 - i])}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
+      out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p50[i])}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
+    }
+    const cur = (byWin.get(w5.resetsAt) ?? []).map(s => [(s.at - startOf(w5.resetsAt)) / 60, s.pct] as [number, number])
+      .filter(([m]) => m >= 0 && m <= nowMin).sort((a, b) => a[0] - b[0])
+    const pts: [number, number][] = [[0, 0], ...cur, [nowMin, pctNow]]
+    // each reading holds until the next one: a step line
+    let path = `M${sx(0)},${sy(0)}`
+    for (let i = 1; i < pts.length; i++) path += ` L${sx(pts[i][0])},${sy(pts[i - 1][1])} L${sx(pts[i][0])},${sy(pts[i][1])}`
+    out += `<defs>${gradDef('pl', ME, false)}</defs><path d="${path}" fill="none" stroke="url(#pl)" stroke-width="2" stroke-linejoin="round"/>`
+    const rw = d.runway(w5)
+    if (rw.r > 0 && nowMin < 300) {
+      const endM = rw.bad ? Math.min(300, nowMin + rw.leftMs / 60000) : 300
+      const endP = Math.min(100, pctNow + (rw.r * (endM - nowMin)) / 60)
+      out += `<path d="M${sx(nowMin)},${sy(pctNow)} L${sx(endM)},${sy(endP)}" fill="none" stroke="${ME}" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>`
+      if (rw.bad) out += `<line x1="${sx(endM)}" x2="${sx(endM)}" y1="${sy(100)}" y2="${base}" stroke="${RED}" stroke-dasharray="2 3"/>`
+    }
+    out += `<circle cx="${sx(nowMin)}" cy="${sy(pctNow)}" r="4" fill="${ME}" stroke="${SURFACE}" stroke-width="2"><title>${esc(`Now · ${pctTxt(pctNow)}`)}</title></circle>`
+    out += label(sx(nowMin) + (nowMin > 200 ? -8 : 8), sy(pctNow) - 8, `${Math.round(pctNow)}% now`, nowMin > 200 ? 'end' : 'start', INK)
+    for (let h = 0; h <= 5; h++) out += label(sx(h * 60), H - 2, `${h}h`, 'middle')
+    const usual = past.length >= 3 ? quant(past.map(([ra, ss]) => at(ss, startOf(ra), nowMin)), 0.5) : null
+    pace = {
+      svg: svgDoc(H, out), alt: `5H window at ${Math.round(pctNow)}%${usual !== null ? `, usual ${Math.round(usual)}% by now` : ''}`,
+      right: rw.bad ? `Runs out in ${dur(rw.leftMs)}` : usual !== null ? `Usual ${Math.round(usual)}% by now` : `${past.length} past windows`,
+      rightBad: rw.bad,
+      legend: [{ name: 'This window', col: ME }, ...(past.length >= 3 ? [{ name: `Usual (middle half of ${past.length} windows)`, col: HIST }] : [])],
+    }
+    text.push(`5H ${Math.round(pctNow)}% · ${pace.right}`)
+  }
+
+  // --- Limit size: work per 1% of 5H, one dot per finished window ---
+  let limit: Chart | null = null
+  {
+    const rows = ledger.filter(r => r.kind === 'five_hour' && (r.per1 ?? 0) > 0).sort((a, b) => a.start - b.start).slice(-40)
+    if (rows.length >= 2) {
+      const H = 112, x0 = 38, top = 10, base = H - 16
+      const max = niceMax(Math.max(...rows.map(r => r.per1 as number)) * 1.1)
+      const sx = (i: number) => x0 + 8 + i * ((HW - x0 - 16) / (rows.length - 1)), sy = (x: number) => base - (x / max) * (base - top)
+      const sure = (r: LedgerRow) => r.pct >= 15
+      const conf = rows.filter(sure).map(r => r.per1 as number)
+      const med = conf.length ? median(conf) : 0
+      let out = [0, max / 2, max].map(t => gridLine(x0, sy(t), t ? fmt(t) : '0')).join('')
+      if (med) out += `<line x1="${x0}" x2="${HW}" y1="${sy(med)}" y2="${sy(med)}" stroke="${DIM}" stroke-dasharray="4 4"/>` + label(HW, sy(med) - 4, `median ${fmt(med)}`, 'end')
+      out += `<path d="M${rows.map((r, i) => `${sx(i)},${sy(r.per1 as number)}`).join(' L')}" fill="none" stroke="${GRID}" stroke-width="2"/>`
+      rows.forEach((r, i) => {
+        const s = sure(r)
+        const tip = `${day(r.start * 1000)} · ${r.pct}% used · ${fmt(r.per1 as number)} per 1%${s ? '' : ' · low confidence'}`
+        out += `<g><title>${esc(tip)}</title><circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="10" fill="transparent"/>` +
+          `<circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="4" fill="${s ? INK : SURFACE}" stroke="${s ? SURFACE : DIM}" stroke-width="${s ? 2 : 1.5}"/></g>`
+      })
+      out += label(sx(0), H - 2, shortDay(keyOfDay(new Date(rows[0].start * 1000)))) + label(sx(rows.length - 1), H - 2, shortDay(keyOfDay(new Date(rows[rows.length - 1].start * 1000))), 'end')
+      let right = `${rows.length} windows · too few to judge`
+      if (conf.length >= 8) { // fewer reliable windows than this is noise
+        const recent = median(conf.slice(-3)), chg = med > 0 ? (recent - med) / med : 0
+        right = Math.abs(chg) < 0.1 ? `Steady · ${conf.length} windows` : `${chg < 0 ? 'Down' : 'Up'} ${Math.round(Math.abs(chg) * 100)}% lately`
+      }
+      limit = {
+        svg: svgDoc(H, out), alt: `Work per 1% of 5H over ${rows.length} finished windows${med ? `, median ${fmt(med)}` : ''}`,
+        right, rightBad: right.startsWith('Down'),
+        legend: [{ name: 'Work per 1% of 5H', col: INK }, { name: 'Hollow: under 15% used', col: DIM }],
+      }
+      text.push(`Limit size: ${right}`)
+    }
+  }
+
+  // --- Projects: where the work went ---
+  let projects: Chart | null = null
+  {
+    const P: Record<string, number> = {}
+    for (const k of keys) for (const [p, u] of Object.entries(D[k]?.p ?? {})) P[p] = (P[p] ?? 0) + u
+    const all = Object.entries(P).sort((a, b) => b[1] - a[1])
+    if (all.length) {
+      const topN = all.slice(0, 5), rest = all.slice(5).reduce((a, b) => a + b[1], 0)
+      const rows = rest > 0 ? [...topN, ['Other', rest] as [string, number]] : topN
+      const rowH = 22, H = rows.length * rowH, lx = 126
+      const max = Math.max(...rows.map(r => r[1]))
+      let out = `<defs>${gradDef('pj', ME, false)}${gradDef('po', MODEL_COL.other, false)}</defs>`
+      rows.forEach(([name, u], i) => {
+        const y = i * rowH + 4, w = Math.max(2, (u / max) * (HW - lx - 52))
+        const nm = name.length > 20 ? name.slice(0, 19) + '…' : name
+        out += `<g><title>${esc(`${name} · ${valTxt(u)}`)}</title>` + `<text x="0" y="${y + 11}" fill="${INK}" font-size="11">${esc(nm)}</text>` +
+          rightBar(lx, y, w, 14, name === 'Other' && i === rows.length - 1 && rest > 0 ? 'url(#po)' : 'url(#pj)') +
+          `<text x="${lx + w + 6}" y="${y + 11}" fill="${DIM}" font-size="11">${esc(valTxt(u))}</text></g>`
+      })
+      projects = { svg: svgDoc(H, out), alt: `Top projects: ${rows.map(r => `${r[0]} ${valTxt(r[1])}`).join(', ')}`, right: `${unit}, ${range} days` }
+      text.push(`Projects: ${rows.slice(0, 3).map(r => `${r[0]} ${valTxt(r[1])}`).join(' · ')}`)
+    }
+  }
+
+  // --- Hours: weekday x hour, one hue by strength ---
+  let hours: Chart | null = null
+  {
+    const M = WEEK.map(() => Array(24).fill(0) as number[])
+    for (const k of keys) {
+      const b = D[k]
+      if (!b) continue
+      const wd = (dayOfKey(k).getDay() + 6) % 7 // Monday first
+      b.h.forEach((u, h) => { M[wd][h] += u })
+    }
+    const max = Math.max(...M.flat())
+    if (max > 0) {
+      const x0 = 32, cell = (HW - x0) / 24, ch = 13, H = 7 * (ch + 2) + 14
+      let out = ''
+      M.forEach((row, r) => {
+        out += label(x0 - 6, r * (ch + 2) + 10, WEEK[r], 'end')
+        row.forEach((u, h) => {
+          const t = u / max
+          out += `<rect x="${x0 + h * cell + 1}" y="${r * (ch + 2)}" width="${cell - 2}" height="${ch}" rx="2" fill="${t < 0.02 ? EMPTY : ME}" fill-opacity="${t < 0.02 ? 1 : (0.18 + t * 0.82).toFixed(2)}"><title>${esc(`${WEEK[r]} ${hourTxt(h)} · ${valTxt(u)}`)}</title></rect>`
+        })
+      })
+      for (const h of [0, 6, 12, 18]) out += label(x0 + h * cell + 1, H - 1, hourTxt(h).replace(' ', '').toLowerCase())
+      hours = { svg: svgDoc(H, out), alt: 'Work by weekday and hour of day', right: 'by hour, local time', legend: [{ name: 'Less', col: mix(SURFACE, ME, 0.3) }, { name: 'More', col: ME }] }
+    }
+  }
+
+  // --- Re-reading: per day, re-reading (grey) under new work (accent) ---
+  let reread: Chart | null = null
+  {
+    const H = 100, x0 = 34, top = 8, base = H - 16
+    const totals = keys.map(k => dayTotal(D[k]))
+    const max = niceMax(val(Math.max(...totals, 0)) * 1.05)
+    const sy = (x: number) => (x / max) * (base - top)
+    const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
+    let out = `<defs>${gradDef('rn', ME, true)}</defs>` + [0, max / 2, max].map(t => gridLine(x0, base - sy(t), tick(t))).join('')
+    keys.forEach((k, i) => {
+      const b = D[k], t = totals[i]
+      if (!b || t <= 0) return
+      const hh = sy(val(b.r)), nh = sy(val(t - b.r)), x = x0 + i * sx + gap / 2
+      out += `<g><title>${esc(`${shortDay(k)} · ${Math.round((b.r / t) * 100)}% re-reading`)}</title><rect x="${x0 + i * sx}" y="${top}" width="${sx}" height="${base - top}" fill="transparent"/>` +
+        `<rect x="${x}" y="${base - hh}" width="${bw}" height="${hh}" fill="${HIST}"/>` + upBar(x, base - hh - nh, bw, Math.max(0.5, nh - 1), 'url(#rn)') + '</g>'
+    })
+    out += label(x0 + 2, H - 2, shortDay(keys[0])) + label(HW, H - 2, 'Today', 'end')
+    const R = keys.reduce((a, k) => a + (D[k]?.r ?? 0), 0), T = totals.reduce((a, b) => a + b, 0)
+    if (T > 0) {
+      reread = {
+        svg: svgDoc(H, out), alt: `${Math.round((R / T) * 100)}% of work re-reading the conversation over ${range} days`, right: `${Math.round((R / T) * 100)}% of work`,
+        legend: [{ name: 'Re-reading the conversation', col: HIST }, { name: 'New work', col: ME }],
+      }
+    }
+  }
+
+  return { ok: Object.keys(D).length > 0, full: !!hist?.full, unit, tiles, daily, pace, limit, projects, hours, reread, text }
+}
+
+// ---------------------------------------------------------------------------
 // The manual (side pane).  Pure: no `$`.
 // ---------------------------------------------------------------------------
 const manualText = (v: View | null, last: number | null, now: number, ledger: LedgerRow[]): string => {
@@ -361,6 +710,14 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
     L.push('')
   }
   const fit = v?.fit
+  L.push('## History pane', '')
+  L.push('The ▤ button (or `/manapool history`) opens charts of past use over 7, 30 or 90 days. Hover a bar or cell for its numbers.')
+  L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading).')
+  L.push('- **5H pace**: this window\'s readings against the middle half of your past windows, with the projection to 100%.')
+  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
+  L.push('- **Projects**: work by the folder a session ran in. **Hours**: work by weekday and hour, local time.')
+  L.push('- **Re-reading**: the share of work spent on cache reads, the old conversation sent again on every call. (The turn strip on the band counts a turn\'s re-reading more exactly.)')
+  L.push('- Older days come from a one-time read of every transcript the first time the pane has data; Claude Code deletes old transcripts, so `history.json` is where they survive.', '')
   L.push('## Model cost on your own meter', '')
   if (fit) {
     const ms = fit.measured ?? {}
@@ -391,9 +748,9 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
 
   L.push('## Where things live', '')
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
-  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock) and `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts only, no conversation text.')
+  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines) and `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts only, no conversation text.')
   L.push('- **Refreshes:** about 1.5 seconds after each of your turns and each meter tick, every 2 minutes otherwise; the cache clock redraws every 30 seconds.')
-  L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
+  L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} history\` opens the History pane (also the ▤ button on the band). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
   return L.join('\n')
 }
 
@@ -417,7 +774,7 @@ type IO = {
   usageBreak: () => Promise<any>
   model: () => Promise<string>
   now: () => Promise<number>
-  scan: (args: string[], stdin: string) => Promise<RunResult>
+  scan: (args: string[], stdin: string, timeoutMs?: number) => Promise<RunResult>
   id: () => Promise<string>
   get: (k: string) => Promise<unknown>
   set: (k: string, val: unknown) => Promise<void>
@@ -449,6 +806,7 @@ export const register: Register = on => {
   // are tried next; each must print "3" for Python's major version.
   let py: string[] | undefined
   let alerts: AlertState | undefined
+  let backfilling = false  // the one-time history backfill is running
 
   // Refresh soon after an event, once the transcript is on disk (it lags a
   // moment).  A reply fires two events; `pending` folds them into one refresh.
@@ -639,7 +997,7 @@ export const register: Register = on => {
         compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
         session: sums._session ?? undefined, weights: sums._weights, long: sums._long, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
-        unpriced: sums._unpriced,
+        unpriced: sums._unpriced, history: sums._history,
       }
       await io.show(() => nv)
       // So the next session (and this one after a reload) can draw at once.
@@ -647,6 +1005,14 @@ export const register: Register = on => {
       await save(io, 'last', { ...nv, samples: curSamples, session: undefined }, nowMs)
       if (sid) await save(io, `ses:${sid}`, { session: nv.session, at: now }, nowMs)
       await runAlerts(io, nv, nowMs)
+      // Older days of the History pane: read every transcript once, in the
+      // background (a few seconds), then refresh to show them.
+      if (nv.history && !nv.history.full && !backfilling) {
+        backfilling = true
+        void io.scan(['--backfill'], '{}', 600000)
+          .then(r => { if (r.exitCode === 0) dirty = true; else backfilling = false })
+          .catch(() => { backfilling = false })
+      }
     } catch (err) {
       await io.show(v => ({ ...(v ?? { wins: [], samples: [], updatedAt: 0 }), refreshing: false, error: String(err) } as View))
     } finally {
@@ -670,7 +1036,7 @@ export const register: Register = on => {
       usageBreak: () => $.session.usage({ breakdown: 'summary' }),
       model: () => $.session.model(),
       now: () => $.clock.now(),
-      scan: async (args, stdin) => {
+      scan: async (args, stdin, timeoutMs = 120000) => {
         if (!py) {
           for (const cand of [['python3'], ['py', '-3'], ['python']]) {
             try {
@@ -681,7 +1047,7 @@ export const register: Register = on => {
           if (!py) throw new Error('Python 3 not found (tried python3, py -3, python).')
         }
         // --plugin: scan.py keeps its files in <Claude config>/plugins/data/<name>
-        return $.process.run([...py, `${$.plugin.root}/hooks/scan.py`, `--plugin=${$.plugin.name}`, ...args], { stdin, timeoutMs: 120000 })
+        return $.process.run([...py, `${$.plugin.root}/hooks/scan.py`, `--plugin=${$.plugin.name}`, ...args], { stdin, timeoutMs })
       },
       get: k => $.store.get(k),
       set: (k, val) => $.store.set(k, val as any),
@@ -742,6 +1108,10 @@ export const register: Register = on => {
       let path = '~/Documents/Mana Pool/manapool-ledger.csv'
       try { path = JSON.parse(r.stdout).exported ?? path } catch { /* keep the short form */ }
       return { text: `Ledger written: ${path} (${ledger.length} windows).` }
+    }
+    if (arg === 'history') {
+      await $.ui.open({ id: HPANE, title: 'Mana Pool History' })
+      return { text: 'History opened.' }
     }
     if (arg === 'test-notify') {
       const how = ioRef ? await wallNotify(ioRef, 'Test from Mana Pool.') : 'not ready'
@@ -837,6 +1207,7 @@ export const register: Register = on => {
     const spin = () => (v.refreshing ? <Text {...note}>  {FR[(v.frame ?? 0) % 10]}</Text> : null)
     const icon = (glyph: string, name: string, onPress: () => void) => <Button key={name} label={glyph} plain dimColor onPress={onPress} />
     const openManual = () => $.ui.open({ id: PANE, title: 'Mana Pool' })
+    const openHistory = () => $.ui.open({ id: HPANE, title: 'Mana Pool History' })
     const P = (u: number) => (d.ok ? pctTxt(d.pc(u)) : '—')
 
     // A usage bar: rounded gradient on graphical surfaces, flat blocks in a terminal.
@@ -947,6 +1318,7 @@ export const register: Register = on => {
             ) : null}
           </Box>
           <Box alignItems="center">
+            {icon('▤', 'History', openHistory)}
             {icon('ⓘ', 'Manual', openManual)}
             <Box>{icon('⊕', 'Expand', () => update($, mode, () => 'full'))}</Box>
           </Box>
@@ -1028,6 +1400,7 @@ export const register: Register = on => {
         <Box justifyContent="space-between">
           <Box><Text size="footnote" weight="semibold">Mana Pool</Text>{version ? <Text size="footnote" dimColor>  v{version}</Text> : null}{spin()}</Box>
           <Box>
+            {icon('▤', 'History', openHistory)}
             {icon('ⓘ', 'Manual', openManual)}
             <Box>{icon('⊖', 'Collapse', () => update($, mode, () => 'mini'))}</Box>
           </Box>
@@ -1172,6 +1545,65 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {v.error && <Text color="red">{v.error}</Text>}
         <Markdown text={manualText(v, last, Date.now(), ledger)} />
+      </Box>
+    )
+  })
+
+  // The History pane: charts of past use (see historyView).
+  on('ui.render', { component: 'Pane', requestId: HPANE }, async ($, e) => {
+    const { Box, Text, Button, Svg } = $.ui.resolve(e) as any
+    const v = await read($, view)
+    if (!v) return <Text dimColor>Reading transcripts…</Text>
+    const range = ((await read($, rangeAtom)) ?? 30) as HistRange
+    const last = (await read($, lastReply)) ?? (v.session?.lastSeen ? v.session.lastSeen * 1000 : null)
+    const ledger = ((await $.store.get('ledger').catch(() => [])) ?? []) as LedgerRow[]
+    const hv = historyView(v, ledger, range, last, Date.now())
+    const pick = (r: HistRange) => (
+      <Button key={`range${r}`} label={`${r}D`} {...(r === range ? { variant: 'primary' } : { plain: true, dimColor: true })}
+        onPress={() => update($, rangeAtom, () => r)} />
+    )
+    // A legend: a coloured square, then the name in text colour (identity never by colour alone).
+    const legend = (items?: { name: string; col: string }[]) => items?.length ? (
+      <Box flexWrap="wrap" columnGap={2}>
+        {items.map(it => <Text key={it.name} size="footnote"><Text color={it.col}>■</Text><Text dimColor> {it.name}</Text></Text>)}
+      </Box>
+    ) : null
+    const section = (title: string, c: Chart | null) => c ? (
+      <Box key={title} flexDirection="column" marginTop={1}>
+        <Box justifyContent="space-between">
+          <Text size="footnote" weight="semibold">{title}</Text>
+          {c.right ? <Text size="footnote" color={c.rightBad ? RED : undefined} dimColor={!c.rightBad}>{c.right}</Text> : null}
+        </Box>
+        <Svg source={c.svg} alt={c.alt} isInteractive />
+        {legend(c.legend)}
+      </Box>
+    ) : null
+    if (!Svg) {
+      // A surface without vector drawing (the terminal): the key numbers as text.
+      return (
+        <Box flexDirection="column">
+          <Text weight="semibold">History · {range}D</Text>
+          {hv.text.map((l, i) => <Text key={i} size="footnote">{l}</Text>)}
+        </Box>
+      )
+    }
+    return (
+      <Box flexDirection="column">
+        <Box justifyContent="space-between" alignItems="center">
+          <Text weight="semibold">History</Text>
+          <Box columnGap={1}>{([7, 30, 90] as HistRange[]).map(pick)}</Box>
+        </Box>
+        {hv.tiles ? <Box marginTop={1}><Svg source={hv.tiles.svg} alt={hv.tiles.alt} /></Box> : null}
+        {!hv.ok ? <Text size="footnote" dimColor>No history yet.</Text> : null}
+        {section('Daily', hv.daily)}
+        {section('5H pace', hv.pace)}
+        {section('Limit size', hv.limit)}
+        {section('Projects', hv.projects)}
+        {section('Hours', hv.hours)}
+        {section('Re-reading', hv.reread)}
+        <Box marginTop={1}>
+          <Text size="footnote" dimColor>{hv.full ? 'Estimates.' : 'Filling in older days…'}  Claude Code on this computer only.</Text>
+        </Box>
       </Box>
     )
   })

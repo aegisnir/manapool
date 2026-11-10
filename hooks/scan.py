@@ -17,6 +17,8 @@ Called by the mod (hooks/register.tsx) with:
           --plugin=<name>       the mod's name: its data folder is <config>/plugins/data/<name>
           --data-dir=<path>     or that folder given directly (tests)
           --reading=<kind>|<resetsAt>|<pct>   a meter reading taken just now (one per window)
+  scan.py --backfill --plugin=<name>   reads EVERY transcript once and fills the daily
+         history (history.json) for days the normal scan no longer reaches
   stdin: {"samples": [...], "ledger": [...]}  what the mod has saved (may be empty;
          samples here only seed the tick log file the first time)
 
@@ -70,6 +72,7 @@ from datetime import datetime, timezone
 # Arguments
 # ---------------------------------------------------------------------------
 starts, session_id, since5h, now, busy, export = [], "", 0.0, 0.0, False, ""
+backfill = False  # --backfill: build the daily history from every transcript once (slow; run in the background)
 cur_model, data_dir, readings = "", "", []
 # Claude Code's own folder: ~/.claude, or wherever CLAUDE_CONFIG_DIR points.
 CONFIG = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
@@ -92,6 +95,8 @@ for a in sys.argv[1:]:
         now = float(a.split("=", 1)[1])
     elif a.startswith("--busy="):
         busy = a.split("=", 1)[1] == "1"
+    elif a == "--backfill":
+        backfill = True
     elif a.startswith("--export="):
         export = os.path.expanduser(a.split("=", 1)[1])
     else:
@@ -372,8 +377,11 @@ oldest = max(oldest, now - 29 * 86400)
 # Without a data folder (tests, --export) it simply reads everything.
 # ---------------------------------------------------------------------------
 CACHE_FILE = os.path.join(data_dir, "scan-cache.json") if data_dir else ""
-CACHE_V = 2   # bump when the record layout below changes: forces a full re-read
+CACHE_V = 3   # bump when the record layout below changes: forces a full re-read
 HEAD = 4096   # bytes fingerprinted at the start of each file
+
+
+CWD_RE = re.compile(r'"cwd":"((?:[^"\\]|\\.)*)"')
 
 
 def head_hash(fh, n):
@@ -386,9 +394,17 @@ def parse(lines):
     calls:   [time, model id, input, output, cache write, of which 5-minute,
               cache read, sidechain 0/1, stop reason, message id, fast 0/1]
     prompts: times of your own messages
-    compact: [time, tokens before, trigger] of each compaction"""
-    rec = {"calls": [], "prompts": [], "compact": []}
+    compact: [time, tokens before, trigger] of each compaction
+    cwd:     the folder the session runs in (first one seen): its project"""
+    rec = {"calls": [], "prompts": [], "compact": [], "cwd": ""}
     for line in lines:
+        if not rec["cwd"] and '"cwd":"' in line:
+            m_ = CWD_RE.search(line)
+            if m_:
+                try:
+                    rec["cwd"] = json.loads('"' + m_.group(1) + '"')
+                except Exception:
+                    pass
         if '"compact_boundary"' in line:
             try:
                 d = json.loads(line)
@@ -429,6 +445,142 @@ def parse(lines):
     return rec
 
 
+
+# ---------------------------------------------------------------------------
+# Daily history (the History pane).  One bucket per local calendar day:
+#   m: work units per model (list prices, the ledger's fixed yardstick)
+#   p: work units per project (the folder a session ran in)
+#   h: work units per hour of the day (24 numbers)
+#   r: the part of those units spent re-reading the conversation (cache reads)
+#   n: model calls
+# Kept in <data folder>/history.json.  Days the normal scan reaches are rebuilt
+# on every scan (it sees every call of those days); older days stay as they
+# were, so the file is the only place their history survives once Claude Code
+# deletes old transcripts.  Token counts only, never conversation text.
+# ---------------------------------------------------------------------------
+HIST_FILE = os.path.join(data_dir, "history.json") if data_dir else ""
+HIST_V = 1
+HIST_KEEP = 400   # days kept in the file
+HIST_SEND = 92    # days sent to the mod (the 90-day view plus slack)
+HOME = os.path.expanduser("~")
+
+
+def proj_of(cwd):
+    """A project's name: the folder a session ran in.  A worktree counts as
+    the repository it belongs to; the home folder itself is "Home"."""
+    if not cwd:
+        return "?"
+    cwd = cwd.split(f"{os.sep}.claude{os.sep}worktrees{os.sep}")[0].rstrip(os.sep)
+    if cwd == HOME.rstrip(os.sep):
+        return "Home"
+    return os.path.basename(cwd) or "?"
+
+
+def show_of(model):
+    """The model's name in the History pane.  Mythos is priced as Fable's
+    family (key_of) but drawn on its own."""
+    m = (model or "").lower()
+    return "mythos" if "mythos" in m else (key_of(m) or "other")
+
+
+def day_of(t):
+    """Local calendar day and hour of an epoch time."""
+    d = datetime.fromtimestamp(t)
+    return d.strftime("%Y-%m-%d"), d.hour
+
+
+def day_start(t):
+    """Epoch of the first local midnight at or after t."""
+    d = datetime.fromtimestamp(t)
+    mid = d.replace(hour=0, minute=0, second=0, microsecond=0)
+    return mid.timestamp() if mid.timestamp() >= t else (mid.timestamp() + 86400)
+
+
+def roll(calls_):
+    """Daily buckets from priced calls (each a dict as built below)."""
+    days = {}
+    for c in calls_:
+        k, hr = day_of(c["t"])
+        b = days.setdefault(k, {"m": {}, "p": {}, "h": [0.0] * 24, "r": 0.0, "n": 0})
+        pr = price(c["k"], c["v"], c["p"], c.get("fast", False))
+        lu = cost(c, pr)
+        name = show_of(c["model"])
+        b["m"][name] = b["m"].get(name, 0.0) + lu
+        b["p"][c["proj"]] = b["p"].get(c["proj"], 0.0) + lu
+        b["h"][hr] += lu
+        b["r"] += c["r"] * pr[3]
+        b["n"] += 1
+    for b in days.values():
+        b["m"] = {k: round(v) for k, v in b["m"].items()}
+        b["p"] = {k: round(v) for k, v in b["p"].items()}
+        b["h"] = [round(x) for x in b["h"]]
+        b["r"] = round(b["r"])
+    return days
+
+
+def hist_merge(fresh, replace_from=None, fill_only=False):
+    """Fold fresh day buckets into history.json under the shared lock.
+    replace_from: days on or after this key are replaced (the normal scan saw
+    all of them); fill_only: only days the file lacks are added (backfill),
+    and the file is marked complete.  Returns the file's days."""
+    if not HIST_FILE:
+        return fresh, False
+    os.makedirs(data_dir, exist_ok=True)
+    with open(LOCK_FILE, "a+") as lk:
+        lock(lk)
+        try:
+            try:
+                with open(HIST_FILE) as f:
+                    got = json.load(f)
+                if got.get("v") != HIST_V:
+                    got = {}
+            except Exception:
+                got = {}
+            days, full = got.get("days") or {}, bool(got.get("full"))
+            if fill_only:
+                for k, b in fresh.items():
+                    days.setdefault(k, b)
+                full = True
+            else:
+                if replace_from:
+                    for k in [k for k in days if k >= replace_from]:
+                        del days[k]
+                days.update(fresh)
+            keep = sorted(days)[-HIST_KEEP:]
+            days = {k: days[k] for k in keep}
+            tmp = f"{HIST_FILE}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
+                f.write(json.dumps({"v": HIST_V, "full": full, "days": days}, separators=(",", ":")))
+            os.replace(tmp, HIST_FILE)
+            return days, full
+        finally:
+            unlock(lk)
+
+
+if backfill:
+    # Every transcript, start to end, once.  The same reply can be logged more
+    # than once (while it streams, and in forked or resumed sessions), so
+    # calls are kept by message id, newest copy wins, as in the normal scan.
+    seen = {}
+    for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+        try:
+            with open(path, "rb") as fh:
+                rec = parse(fh.read().decode("utf-8", errors="ignore").splitlines())
+        except OSError:
+            continue
+        proj = proj_of(rec["cwd"])
+        for t, model, i, o, w_, w5, r, side, stop, key, fast in rec["calls"]:
+            fam = key_of(model)
+            if not fam or not t:
+                continue  # unpriced models are left out, as everywhere else
+            prev = seen.get(key)
+            if prev is None or t >= prev["t"]:
+                seen[key] = {"t": t, "k": fam, "v": ver_of(model), "model": model, "i": i, "o": o, "w": w_,
+                             "w5": min(w5, w_), "r": r, "p": i + w_ + r, "fast": bool(fast), "proj": proj}
+    days, full = hist_merge(roll(seen.values()), fill_only=True)
+    print(json.dumps({"backfill": len(seen), "days": len(days)}))
+    sys.exit(0)
+
 cache = {}
 if CACHE_FILE:
     try:
@@ -457,13 +609,14 @@ for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
         with open(path, "rb") as fh:
             grown = bool(e) and st_.st_size >= e["off"] and head_hash(fh, e["hlen"]) == e["head"]
             if not grown:
-                e = {"off": 0, "calls": [], "prompts": [], "compact": []}
+                e = {"off": 0, "calls": [], "prompts": [], "compact": [], "cwd": ""}
             fh.seek(e["off"])
             chunk = fh.read()
             end = chunk.rfind(b"\n") + 1  # complete lines only
             rec = parse(chunk[:end].decode("utf-8", errors="ignore").splitlines())
             for k_ in ("calls", "prompts", "compact"):
                 e[k_] = e[k_] + rec[k_]
+            e["cwd"] = e.get("cwd") or rec["cwd"]
             e["off"] += end
             e["hlen"] = min(HEAD, e["off"])
             e["head"] = head_hash(fh, e["hlen"])
@@ -521,7 +674,8 @@ for path, e in entries.items():
             continue
         c = {"t": t, "k": fam, "v": ver_of(model), "model": model,
              "i": i, "o": o, "w": w_, "w5": min(w5, w_), "r": r, "p": i + w_ + r, "fast": bool(fast),
-             "main": is_main and not side, "sub": bool(is_sub or (is_main and side)), "stop": stop}
+             "main": is_main and not side, "sub": bool(is_sub or (is_main and side)), "stop": stop,
+             "proj": proj_of(e.get("cwd", ""))}
         prev = calls.get(key)
         # The same reply can be logged more than once: while it streams
         # (keep the newest copy's token counts) and in a forked or resumed
@@ -541,6 +695,11 @@ for path, e in entries.items():
 
 compactions.sort()
 auto_pre = [pre for _, pre in sorted(auto)]
+
+# Daily history: every day from the first midnight the scan fully covers.
+_cover = day_start(oldest)
+_fresh = roll([c for c in calls.values() if c["t"] >= _cover])
+_hdays, _hfull = hist_merge(_fresh, replace_from=day_of(_cover)[0])
 
 CALLS = sorted(calls.values(), key=lambda c: c["t"])
 prompts.sort()
@@ -978,5 +1137,6 @@ if SAMPLES_FILE:
     out["_samples"] = samples
 
 out["_unpriced"] = unpriced  # model id -> calls left out (not in the price table)
+out["_history"] = {"full": _hfull, "days": {k: _hdays[k] for k in sorted(_hdays)[-HIST_SEND:]}}
 out["_ticks"] = len(samples)
 print(json.dumps(out))
