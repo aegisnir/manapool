@@ -27,6 +27,7 @@ A band above the prompt, in two sizes (Full and Mini):
 
 Plus:
 
+- A **History** pane (the ▤ button, or `/manapool history`) with charts over 7, 30 or 90 days: work per day by model, this 5H window's pace against your usual, the limit's size per window, work by project and by hour, and how much of it went to re-reading the conversation.  Hover a bar for its numbers.
 - A user manual in a side pane (the info icon) with every formula, assumption and your live numbers.
 - `/manapool` opens the manual and prints the key numbers as plain text, for surfaces that cannot draw the band (a phone, for example).
 - `/manapool export` writes the window ledger to `~/Documents/Mana Pool/manapool-ledger.csv`.
@@ -56,7 +57,7 @@ claude plugin install manapool --marketplace aegisnir/manapool
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `aegisnir/manapool`, then **Add plugin**.
 
-To update: `/plugin update manapool`. To remove: `/plugin uninstall manapool`, then delete `~/.claude/plugins/data/manapool/` if you also want its tick log gone.
+To update: `/plugin update manapool`. To remove: `/plugin uninstall manapool`, then delete `~/.claude/plugins/data/manapool/` if you also want its tick log and history gone.
 
 ## How the estimates work, and what is a guess
 
@@ -72,7 +73,7 @@ List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row 
 
 ## Privacy
 
-It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts, times, model names and message ids (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` if you set it): `samples.jsonl` (the tick log) and `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines). Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
+It reads `~/.claude/projects/**/*.jsonl` on your own computer and keeps token counts, times, model names and message ids (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` if you set it): `samples.jsonl` (the tick log), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines) and `history.json` (one row per day for the History pane: work per model, per hour, and per project, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
 
 ## Files
 

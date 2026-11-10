@@ -2,6 +2,13 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## 0.4.0 (2026-11-09)
+
+- **History pane.**  The ▤ button on the band (or `/manapool history`) opens charts over 7, 30 or 90 days: daily work stacked by model, this 5H window's pace against the middle half of past windows, work per 1% of 5H per finished window, top projects, a weekday-by-hour heatmap, and the share spent re-reading the conversation.  Bars use the band's gradient; every chart has hover numbers and a text description.
+- **Daily history file.**  The scanner keeps `history.json` in its data folder: one row per local day (work per model, per project folder name, per hour, cache-read share), kept 400 days.  Days the normal scan covers are rebuilt each scan; older days come from a one-time read of every transcript, run in the background the first time.
+- One colour per model (Opus, Sonnet, Fable, Mythos, Haiku, plus grey for anything else), checked as a set for colour-blind separation.
+- The scan cache records each transcript's folder, so it is rebuilt once after updating.
+
 ## 0.3.7 (2026-11-09)
 
 Suggested in a review that pointed to [Gnomonkit](https://github.com/joshualytle/Gnomonkit) for the same ideas. Built from the suggestions; no code copied.

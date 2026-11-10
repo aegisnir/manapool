@@ -341,5 +341,45 @@ check("CLAUDE_CONFIG_DIR: transcripts found there", d[str(NOW - 3600)]["listUnit
 check("CLAUDE_CONFIG_DIR: data folder created there", os.path.exists(os.path.join(cfg, "plugins", "data", "manapool", "scan-cache.json")), True)
 shutil.rmtree(home)
 
+# ---------------- daily history (the History pane) ----------------
+# 23. Days the scan covers are rebuilt each scan; older days come only from
+#     the backfill and survive later scans.  A reply logged twice counts once,
+#     the project is the session's folder, Mythos is drawn apart from Fable.
+def with_cwd(rec, cwd):
+    return dict(rec, cwd=cwd)
+
+
+def local_day(t):
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d")
+
+
+home = home_with({})
+dd = os.path.join(home, "data")
+old_t = NOW - 20 * 86400               # out of the normal scan's reach
+new_t = NOW - 600
+write(home, "old.jsonl", [with_cwd(asst(old_t, "o1", "claude-sonnet-5-5", i=1000), "/x/alpha")], old_t + 10)
+write(home, "new.jsonl", [with_cwd(asst(new_t, "n1", "claude-opus-5-5", i=100, r=1000), "/x/beta"),
+                          with_cwd(asst(new_t + 1, "n1", "claude-opus-5-5", i=100, r=1000), "/x/beta"),  # streamed copy
+                          with_cwd(asst(new_t + 5, "n2", "claude-mythos-5", i=10), "/x/beta/.claude/worktrees/wt1")],
+      new_t + 10)
+d = run_in(home, [NOW - 3 * 86400, f"--now={NOW}", f"--data-dir={dd}"])
+h = d["_history"]
+check("history: not complete before the backfill", h["full"], False)
+check("history: old day not reached by a normal scan", local_day(old_t) in h["days"], False)
+b = h["days"].get(local_day(new_t), {"m": {}, "p": {}, "r": 0, "n": 0})
+# opus 5.5: input 4/2 = 2 units, cache read 0.2/2 = 0.1 unit per token
+check("history: streamed reply counted once", b["m"].get("opus"), 100 * 2 + 1000 * 0.1)
+check("history: re-reading = cache reads", b["r"], 100)
+check("history: Mythos drawn on its own", "mythos" in b["m"], True)
+check("history: worktree counts as its repository", sorted(b["p"]), ["beta"])
+check("history: calls", b["n"], 2)
+run_in(home, ["--backfill", f"--data-dir={dd}"])
+d = run_in(home, [NOW - 3 * 86400, f"--now={NOW}", f"--data-dir={dd}"])
+h = d["_history"]
+check("history: complete after the backfill", h["full"], True)
+check("history: backfilled day kept by later scans", h["days"].get(local_day(old_t), {}).get("p"), {"alpha": 1000})  # sonnet 5.5 input = 1 unit
+check("history: covered day unchanged by backfill", h["days"][local_day(new_t)]["n"], 2)
+shutil.rmtree(home)
+
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)

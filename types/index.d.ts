@@ -40,6 +40,12 @@ export type Fit = {
   source: string; ticks: number; r2: number | null; K: number[]; MM: Record<string, number>
   model_ticks: Record<string, number>; measured?: Record<string, { x: number; ticks: number; spread: number }>
 }
+// One local calendar day of work (scan.py's history.json): work units at list
+// prices per model (m), per project folder (p) and per hour of the day (h),
+// the part spent re-reading the conversation (r), and model calls (n).
+export type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number }
+// full = older days were filled in from every transcript (the one-time backfill).
+export type History = { full: boolean; days: Record<string, HistDay> }
 export type Check = { per1: number | null; pct: number; lo: number | null; hi: number | null; n: number; outside: number }
 export type View = {
   wins: Win[]
@@ -57,6 +63,7 @@ export type View = {
   check?: Check | null
   ledgerCount?: number
   unpriced?: Record<string, number>  // model id -> calls left out: not in the price table
+  history?: History                  // the last 92 days, for the History pane
   refreshing?: boolean
   frame?: number
   error?: string
@@ -72,6 +79,8 @@ declare module 'claude-code' {
       lastReply: Shaped<number | null>
       // True while one of your turns is running.
       busy: Shaped<boolean>
+      // The History pane's range in days.
+      range: Shaped<7 | 30 | 90>
     }
   }
 }
