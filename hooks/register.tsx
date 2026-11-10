@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.12' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.13' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -32,6 +32,11 @@ const LISTW: Record<string, number[]> = {
 const KEEP_SESSION_MS = 7 * 86400e3
 const MAX_SESSIONS = 40
 const MAX_LEDGER = 3000
+// Ledger rows built under an older accounting rule are kept for the record but
+// left out of every chart and comparison: they priced work differently.  Must
+// equal RULE in scan.py (a test checks).
+const LEDGER_RULE = 4
+const current = (r: LedgerRow) => (r.rule ?? 0) >= LEDGER_RULE
 // A runway shorter than this raises one system notification per 5H window.
 const WALL_MS = 30 * 60 * 1000
 
@@ -137,8 +142,14 @@ const derive = (v: View, last: number | null, now: number) => {
   const turns: Turn[] = ses?.turns ?? []
   const done = turns.filter(t => !t.live)
   const lt = done[done.length - 1]
-  // your model: the one Claude Code reports, else the one the last turn ran on
-  const me = keyOf(v.model ?? '') || lt?.k || 'sonnet'
+  // your model: the one Claude Code reports, else the one the last turn ran on.
+  // A reported model with no list price (Mythos today) stays itself: `me` is
+  // '' and every forecast priced on it reads "unpriced" instead of borrowing
+  // the price of whatever model ran before.
+  const curModel = v.model ?? ''
+  const me = keyOf(curModel) || (curModel ? '' : lt?.k || 'sonnet')
+  const curFam = me || (/claude-([a-z]+)/.exec(curModel.toLowerCase())?.[1] ?? curModel.toLowerCase())
+  const meName = cap(curFam)
 
   // --- the meters: hundredths, pace, runway ---
   // The meter moves in whole points.  The hundredths estimate how far toward
@@ -188,14 +199,15 @@ const derive = (v: View, last: number | null, now: number) => {
   const idle = last ? now - last : null
   // Compared by family and version ("haiku-5.5"); by family alone when either
   // side names no version.
-  const curId = me + (verOf(v.model ?? '') ? `-${verOf(v.model ?? '')}` : '')
+  const curId = curFam + (verOf(curModel) ? `-${verOf(curModel)}` : '')
   const cacheId = ses?.lastModel ?? curId
-  const otherModel = idle !== null && (cacheId.includes('-') && curId.includes('-') ? cacheId !== curId : cacheId.split('-')[0] !== me)
+  const otherModel = idle !== null && (cacheId.includes('-') && curId.includes('-') ? cacheId !== curId : cacheId.split('-')[0] !== curFam)
   const warm = idle !== null && idle < TTL_MS && !otherModel
   const ctxTok = v.ctx?.tokens ?? lt?.ctx ?? 0
   // When the prompt cache is cold, the conversation is written to cache again instead of read.
-  const wCtx = wAt(me, ctxTok)
-  const reloadU = ctxTok * (wCtx[2] - wCtx[3])
+  // null = the current model is unpriced.
+  const wCtx = me ? wAt(me, ctxTok) : null
+  const reloadU = wCtx ? ctxTok * (wCtx[2] - wCtx[3]) : null
 
   // --- Cost pill: token overhead, break-even and the cache clock ---
   const base = ses?.base ?? 0
@@ -206,13 +218,16 @@ const derive = (v: View, last: number | null, now: number) => {
   const save = recent.length ? median(recent.map(t => t.u - t.f)) : 0
   // a hand-off costs once: writing the note here, then the new session storing
   // its starting context (system prompt, tools, note, a few files) in its cache
-  const oneTimeU = ho.noteOut * wCtx[1] + (base + ho.extra) * wAt(me, base + ho.extra)[2]
-  const payback = save > 0 ? oneTimeU / save : Infinity
+  // (the note is written on the current model: unknown when it is unpriced)
+  const noteU = wCtx ? ho.noteOut * wCtx[1] : null
+  const oneTimeU = noteU !== null ? noteU + (base + ho.extra) * wAt(me, base + ho.extra)[2] : null
+  const payback = oneTimeU !== null && save > 0 ? oneTimeU / save : Infinity
   const histShare = lt && lt.u > 0 ? lt.h / lt.u : 0
-  const turnsTxt = (n: number) => (n === Infinity ? 'no savings yet' : n < 1 ? 'pays back in under a turn' : `pays back in ~${Math.round(n)} turn${Math.round(n) === 1 ? '' : 's'}`)
+  const turnsTxt = (n: number) => (!me ? 'unpriced' : n === Infinity ? 'no savings yet' : n < 1 ? 'pays back in under a turn' : `pays back in ~${Math.round(n)} turn${Math.round(n) === 1 ? '' : 's'}`)
   let cost: Pill
   const costWhy = `turns cost ${rMed.toFixed(1)}x a new session · hand-off ${turnsTxt(payback)}`
-  if (!lt) cost = { lvl: 0, label: 'Keep going', why: 'no finished turn yet' }
+  if (!me) cost = { lvl: 0, label: 'Unpriced', why: `${meName} has no list price yet` }
+  else if (!lt) cost = { lvl: 0, label: 'Keep going', why: 'no finished turn yet' }
   else if (payback <= 2 && rMed >= 2.5) cost = { lvl: 3, label: 'Hand off', why: costWhy }
   else if (payback <= 5 && rMed >= 1.5) cost = { lvl: 2, label: 'Consider handoff', why: costWhy }
   else if (idle !== null && !warm && rMed >= 1.3) cost = { lvl: 1, label: 'Good moment to switch', why: 'the prompt cache expired, so the next message here rewrites the whole conversation to cache anyway' }
@@ -242,7 +257,7 @@ const derive = (v: View, last: number | null, now: number) => {
   // re-caching the conversation once when the cache is cold (expired, or
   // made by another model).
   const fin = done.slice(-3)
-  const nextU = fin.length ? median(fin.map(t => t.on?.[me] ?? t.u)) + (idle !== null && !warm ? reloadU : 0) : 0
+  const nextU = !me ? null : fin.length ? median(fin.map(t => t.on?.[me] ?? t.u)) + (idle !== null && !warm ? (reloadU ?? 0) : 0) : 0
   // Per-turn cost on model k: your last 3 turns re-priced on k, either as they
   // ran here (old conversation re-read) or as they would run in a new session
   // after a hand-off (scan.py's `on` and `onf`).
@@ -257,11 +272,13 @@ const derive = (v: View, last: number | null, now: number) => {
   const switchRows = MODELS.filter(k => k !== me).map(k => {
     const nowOnce = pc(ctxTok * wAt(k, ctxTok)[2])
     const nowTurn = perTurn(k, false)
-    const hoOnce = pc(ho.noteOut * wCtx[1] + (base + ho.extra) * wAt(k, base + ho.extra)[2])
+    // null when the current model is unpriced (its note-writing cost is unknown)
+    const hoOnce = noteU !== null ? pc(noteU + (base + ho.extra) * wAt(k, base + ho.extra)[2]) : null
     const hoTurn = perTurn(k, true)
     const nowTotal = nowOnce + HORIZON_TURNS * nowTurn
-    const hoTotal = hoOnce + HORIZON_TURNS * hoTurn
-    const pick = nowTotal < 0.05 && hoTotal < 0.05 ? 'tiny' : hoTotal < nowTotal ? 'handoff' : 'now'
+    const hoTotal = hoOnce !== null ? hoOnce + HORIZON_TURNS * hoTurn : null
+    // no pick when the two cannot be compared
+    const pick = hoTotal === null ? '' : nowTotal < 0.05 && hoTotal < 0.05 ? 'tiny' : hoTotal < nowTotal ? 'handoff' : 'now'
     return { k, nowOnce, nowTurn, hoOnce, hoTurn, pick }
   })
 
@@ -270,7 +287,7 @@ const derive = (v: View, last: number | null, now: number) => {
   const allOn = MODELS.map(k => ({ k, pct: ses ? pc(ses.allOn[k] ?? 0) : 0 }))
 
   return {
-    w5, w7, ses, me, ok, pc, rate, turns, lt, est, pace, runway, idle, warm, otherModel, ctxTok, reloadU, base, ho,
+    w5, w7, ses, me, meName, ok, pc, rate, turns, lt, est, pace, runway, idle, warm, otherModel, ctxTok, reloadU, base, ho,
     ratio, rMed, payback, histShare, turnsTxt, cost, detail, worst, pctFull, compactAt, grow, turnsLeft,
     switchRows, sesPct, allOn, oneTimeU, nextU, fin,
   }
@@ -398,7 +415,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   const w5 = v.wins.find(w => w.kind === 'five_hour')
   const tick7 = v.samples.filter(s => s.kind === 'seven_day' && (s.lu ?? 0) > 0 && s.pct >= 3 && (!w7 || s.resetsAt === w7.resetsAt))
     .sort((a, b) => b.pct - a.pct)[0]
-  const led7 = ledger.filter(r => r.kind === 'seven_day' && (r.per1 ?? 0) > 0).map(r => r.per1 as number)
+  const led7 = ledger.filter(r => r.kind === 'seven_day' && (r.per1 ?? 0) > 0 && current(r)).map(r => r.per1 as number)
   const per7 = tick7 ? (tick7.lu as number) / tick7.pct : led7.length ? median(led7) : 0
   const unit = per7 > 0 ? '% of 7D' : 'work units'
   const val = (u: number) => (per7 > 0 ? u / per7 : u)
@@ -534,7 +551,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   // --- Limit size: work per 1% of 5H, one dot per finished window ---
   let limit: Chart | null = null
   {
-    const rows = ledger.filter(r => r.kind === 'five_hour' && (r.per1 ?? 0) > 0).sort((a, b) => a.start - b.start).slice(-40)
+    const rows = ledger.filter(r => r.kind === 'five_hour' && (r.per1 ?? 0) > 0 && current(r)).sort((a, b) => a.start - b.start).slice(-40)
     if (rows.length >= 2) {
       const H = 112, x0 = 38, top = 10, base = H - 16
       const max = niceMax(Math.max(...rows.map(r => r.per1 as number)) * 1.1)
@@ -754,7 +771,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
 
   L.push('## Where things live', '')
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
-  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines) and `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts only, no conversation text.')
+  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript\'s full path and the full path of the folder each session ran in), `ticks.json` (each meter tick\'s percent and work per model, kept 180 days) and `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts, times, model names and file paths; no conversation text.')
   L.push('- **Refreshes:** about 1.5 seconds after each of your turns and each meter tick, every 2 minutes otherwise; the cache clock redraws every 30 seconds.')
   L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} history\` opens the History pane (also the ▤ button on the band). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
   return L.join('\n')
@@ -1459,8 +1476,12 @@ export const register: Register = on => {
           <Box>
             {Lab('Next turn')}
             <Text>
-              <Text size="footnote" tabular>~{P(d.nextU)}</Text>
-              <Text {...fn}> of 5H on {cap(d.me)} (current), from your last {d.fin.length === 1 ? 'turn' : `${d.fin.length} turns`}</Text>
+              {d.nextU === null
+                ? <Text {...fn}>unpriced on {d.meName} (current)</Text>
+                : <Text>
+                    <Text size="footnote" tabular>~{P(d.nextU)}</Text>
+                    <Text {...fn}> of 5H on {d.meName} (current), from your last {d.fin.length === 1 ? 'turn' : `${d.fin.length} turns`}</Text>
+                  </Text>}
             </Text>
           </Box>
         ) : null}
@@ -1491,8 +1512,8 @@ export const register: Register = on => {
             <Text size="footnote" color={d.idle === null ? DIM : d.warm ? '#f6b26b' : '#7fb2ff'}>{d.idle === null ? 'No reply yet' : d.warm ? 'Active' : d.otherModel ? 'Model changed' : 'Expired'}</Text>
             <Text {...fn}>
               {d.idle === null ? '' : d.warm
-                ? ` · expires in ${dur(TTL_MS - d.idle)} · after that, next message costs +${P(d.reloadU)} to re-cache`
-                : ` · next message costs +${P(d.reloadU)} to re-cache ${fmt(d.ctxTok)} · a new session caches ${fmt(d.base + d.ho.extra)}`}
+                ? ` · expires in ${dur(TTL_MS - d.idle)} · after that, ${d.reloadU === null ? 're-cache unpriced' : `next message costs +${P(d.reloadU)} to re-cache`}`
+                : ` · next message ${d.reloadU === null ? `re-caches ${fmt(d.ctxTok)} (unpriced)` : `costs +${P(d.reloadU)} to re-cache ${fmt(d.ctxTok)}`} · a new session caches ${fmt(d.base + d.ho.extra)}`}
             </Text>
           </Text>
         </Box>
@@ -1528,7 +1549,7 @@ export const register: Register = on => {
                 return (
                   <Box key={r.k} width={COLW} flexShrink={0}>
                     <Text size="footnote" tabular color={best ? LVL[0] : undefined} dimColor={!best}>
-                      {d.ok ? `+${pctTxt(once)}, then ${pctTxt(turn)}/turn` : '—'}
+                      {d.ok ? `${once === null ? 'unpriced' : `+${pctTxt(once)}`}, then ${pctTxt(turn)}/turn` : '—'}
                     </Text>
                   </Box>
                 )

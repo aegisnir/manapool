@@ -66,7 +66,7 @@ except ImportError:
     def unlock(f):
         f.seek(0)
         msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
 # Arguments
@@ -343,7 +343,11 @@ def win_bounds(kind, resets_at):
 # reading, so they can read too high.  They are rebuilt below while their
 # transcripts and readings are still on disk, and left out of the limit check
 # otherwise.
-RULE = 3  # 3: 2026-11-09 evening (exact reading times); 2 had the whole-second cutoff
+# 4: 5-minute cache writes priced apart (rule-3 rows priced every write as
+#    the 1-hour kind, so the same work read up to 37.5% bigger)
+# 3: exact reading times; 2 had the whole-second cutoff
+# The History pane applies the same filter (register.tsx LEDGER_RULE: keep equal).
+RULE = 4
 # A row is also redone when the log holds a higher reading for its window
 # than the row used (a session saved its reading after another session had
 # already closed the window).
@@ -462,7 +466,8 @@ def parse(lines):
 # Kept in <data folder>/history.json.  Days the normal scan reaches are rebuilt
 # on every scan (it sees every call of those days); older days stay as they
 # were, so the file is the only place their history survives once Claude Code
-# deletes old transcripts.  Token counts only, never conversation text.
+# deletes old transcripts.  Numbers and project folder names, never
+# conversation text.
 # ---------------------------------------------------------------------------
 HIST_FILE = os.path.join(data_dir, "history.json") if data_dir else ""
 HIST_V = 1
@@ -495,10 +500,14 @@ def day_of(t):
 
 
 def day_start(t):
-    """Epoch of the first local midnight at or after t."""
+    """Epoch of the first local midnight at or after t.  The next midnight is
+    found by stepping the calendar date, not by adding 24 hours: a day with a
+    daylight-saving change is 23 or 25 hours long."""
     d = datetime.fromtimestamp(t)
     mid = d.replace(hour=0, minute=0, second=0, microsecond=0)
-    return mid.timestamp() if mid.timestamp() >= t else (mid.timestamp() + 86400)
+    if mid.timestamp() >= t:
+        return mid.timestamp()
+    return datetime.combine(mid.date() + timedelta(days=1), mid.time()).timestamp()
 
 
 def roll(calls_):
@@ -612,7 +621,10 @@ for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
         continue
     try:
         with open(path, "rb") as fh:
-            grown = bool(e) and st_.st_size >= e["off"] and head_hash(fh, e["hlen"]) == e["head"]
+            # Appended to = bigger than last time with the same start.  A file
+            # that changed without growing was rewritten in place (somewhere
+            # past the fingerprint, perhaps), so it is read again in full.
+            grown = bool(e) and st_.st_size > e["size"] and head_hash(fh, e["hlen"]) == e["head"]
             if not grown:
                 e = {"off": 0, "calls": [], "prompts": [], "compact": [], "cwd": ""}
             fh.seek(e["off"])
@@ -752,7 +764,11 @@ def calls_between(a, b):
     return [c for c in CALLS if a < c["t"] <= b]
 
 
-ticks = []  # (dp, [list-weighted output, write(+input), read], {model: list units}, start, end)
+# Each tick: (dp, [list-weighted output, write(+input), read],
+#             {model: the same three numbers for that model's calls}, start, end, calls)
+# The three groups are the ones the token-type fit below scales (K), so the
+# model fit can apply K first and measure only what K leaves unexplained.
+ticks = []
 by_win = {}
 for s in samples:
     if s.get("kind") == "five_hour" and s.get("resetsAt"):
@@ -765,13 +781,18 @@ for ra, lst in by_win.items():
             continue
         x = [0.0, 0.0, 0.0]
         per_model = {}
+        n_calls = 0
         for c in calls_between(cut(a), cut(b)):
             L = price(c["k"], c["v"], c["p"], c.get("fast", False))
-            x[0] += c["o"] * L[1]
-            x[1] += (c["w"] - c["w5"]) * L[2] + c["w5"] * L[4] + c["i"] * L[0]
-            x[2] += c["r"] * L[3]
-            per_model[c["k"]] = per_model.get(c["k"], 0.0) + list_units(c)
-        ticks.append((dp, x, per_model, a["at"], b["at"]))
+            g = (c["o"] * L[1],
+                 (c["w"] - c["w5"]) * L[2] + c["w5"] * L[4] + c["i"] * L[0],
+                 c["r"] * L[3])
+            pm = per_model.setdefault(c["k"], [0.0, 0.0, 0.0])
+            for j in range(3):
+                x[j] += g[j]
+                pm[j] += g[j]
+            n_calls += 1
+        ticks.append((dp, x, per_model, a["at"], b["at"], n_calls))
 
 fit = {"source": "list", "ticks": len(ticks), "r2": None, "K": [1, 1, 1, 1], "MM": dict(MM), "model_ticks": {}}
 usable = [t for t in ticks if sum(t[1]) > 0]
@@ -818,11 +839,16 @@ def median(a):
 # - Recent ticks count more (30-day half-life), so if Anthropic changes how
 #   the plan weighs a model, the estimate follows within weeks.
 # - Ticks are kept in ticks.json for 180 days, so the estimate survives
-#   Claude Code deleting transcripts after about 30 days.
-# Measured on list-price units (the token-type weights K are not applied).
+#   Claude Code deleting transcripts after about 30 days.  A tick rebuilt
+#   from fewer calls than the kept copy (one of its transcripts was deleted)
+#   does not replace it: the kept copy is the complete one.
+# Measured on units with the token-type weights K already applied, so a model
+# whose work is mostly cache reads is not given a second adjustment for what
+# K already accounts for.  Ticks keep their three token groups, not one total,
+# so the current K applies to old ticks too.
 # ---------------------------------------------------------------------------
 TICKS_FILE = os.path.join(data_dir, "ticks.json") if data_dir else ""
-TICK_V = 1
+TICK_V = 2  # 2: [start, end, % moved, {model: [output, write+input, read]}, calls]; 1 kept list totals only
 TICK_KEEP_DAYS = 180
 HALF_LIFE_DAYS = 30
 PRIOR_SD = math.log(2)   # starting belief: a model's weight is within ~2x of list
@@ -832,10 +858,12 @@ DOMINANT = 0.85          # a tick counts for a model when 85%+ of its work was o
 
 def tick_merge(fresh):
     """Fold this scan's ticks into ticks.json under the shared lock.  A tick
-    this scan rebuilt (its transcripts still exist) replaces the stored copy;
-    older ones come from the file.  Returns every kept tick as
-    [start, end, % moved, {model: list units}]."""
-    rows = {f"{a:.3f}|{b:.3f}": [a, b, dp, {k: round(v, 1) for k, v in pm.items()}] for dp, x, pm, a, b in fresh}
+    this scan rebuilt replaces the stored copy unless it saw fewer calls
+    (a contributing transcript is gone); older ones come from the file.
+    Returns every kept tick as
+    [start, end, % moved, {model: [output, write+input, read]}, calls]."""
+    rows = {f"{a:.3f}|{b:.3f}": [a, b, dp, {k: [round(v, 1) for v in g] for k, g in pm.items()}, n]
+            for dp, x, pm, a, b, n in fresh}
     if not TICKS_FILE:
         return sorted(rows.values())
     try:
@@ -850,10 +878,14 @@ def tick_merge(fresh):
                         got = {}
                 except Exception:
                     got = {}
-                kept = {f"{t[0]:.3f}|{t[1]:.3f}": t for t in got.get("ticks") or [] if len(t) == 4}
-                kept.update(rows)
+                kept = {f"{t[0]:.3f}|{t[1]:.3f}": t for t in got.get("ticks") or [] if len(t) == 5}
+                for key, t in rows.items():
+                    old = kept.get(key)
+                    if old is None or t[4] >= old[4]:
+                        kept[key] = t
+                rows = kept
                 floor_ = now - TICK_KEEP_DAYS * 86400
-                out = sorted(t for t in kept.values() if t[1] >= floor_)
+                out = sorted((t for t in rows.values() if t[1] >= floor_), key=lambda t: (t[0], t[1]))
                 tmp = f"{TICKS_FILE}.{os.getpid()}.tmp"
                 with open(tmp, "w") as f:
                     f.write(json.dumps({"v": TICK_V, "ticks": out}, separators=(",", ":")))
@@ -862,13 +894,15 @@ def tick_merge(fresh):
             finally:
                 unlock(lk)
     except Exception:
-        return sorted(rows.values())  # a locked or unwritable file: use this scan's ticks
+        return sorted(rows.values(), key=lambda t: (t[0], t[1]))  # a locked or unwritable file: use this scan's ticks
 
 
 all_ticks = tick_merge(usable)
-pool = {k: [] for k in MODELS}  # per model: (weight, % moved, list units)
+pool = {k: [] for k in MODELS}  # per model: (weight, % moved, K-weighted units)
 ref_y = ref_x = 0.0
-for a, b, dp, pm in all_ticks:
+for a, b, dp, groups, _n in all_ticks:
+    # output, write+input, read, each times its token-type factor
+    pm = {k: g[0] * K[1] + g[1] * K[2] + g[2] * K[3] for k, g in groups.items()}
     tot = sum(pm.values())
     if tot <= 0 or dp <= 0:
         continue

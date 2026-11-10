@@ -6,7 +6,7 @@ Nothing outside a temporary folder is read or written.
 
 Run from the repository root:  python3 tests/test_scan.py
 (or pass the path to a scan.py to test another copy)."""
-import json, os, subprocess, sys, tempfile, shutil
+import json, os, re, subprocess, sys, tempfile, shutil
 from datetime import datetime, timezone
 
 SCAN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "hooks", "scan.py")
@@ -14,6 +14,8 @@ SCAN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.pat
 BASE_ENV = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
 NOW = 1_800_000_000  # fixed clock
 fails = 0
+# The ledger rule the scanner builds rows under now (rows below it are rebuilt).
+RULE_NOW = int(re.search(r"^RULE = (\d+)", open(SCAN).read(), re.M).group(1))
 
 
 def iso(t):
@@ -227,7 +229,7 @@ check("legacy whole-second reading keeps a same-second reply", d["_ledgerNew"][0
 r3 = asst(0, "m3", "claude-sonnet-5-5", i=1000); r3["timestamp"] = iso(rt + 600)
 row = {"kind": "five_hour", "resetsAt": resets, "start": st, "end": end, "pct": 20, "seen": rt + 0.5,
        "units": 2000, "per1": 100, "tokens": [2000, 0, 0, 0], "byModel": {"claude-sonnet-5-5": [2000, 0, 0, 0]},
-       "models": ["Sonnet"], "outside": 0, "weights": "list", "at": end, "readings": 2, "rule": 3}
+       "models": ["Sonnet"], "outside": 0, "weights": "list", "at": end, "readings": 2, "rule": RULE_NOW}
 late = samples + [{"at": rt + 700.5, "kind": "five_hour", "pct": 40, "resetsAt": resets}]
 d = run({"s.jsonl": [r1, r2, r3]}, [NOW - 3600], {"samples": late, "ledger": [row]})
 new = d["_ledgerNew"][0] if d["_ledgerNew"] else {}
@@ -260,7 +262,7 @@ exact = [{"at": st + 30, "ts": 2, "kind": "five_hour", "pct": 0, "resetsAt": res
 d = run({"s.jsonl": [q1, q2]}, [NOW - 3600], {"samples": exact, "ledger": []})
 check("exact .000 reading leaves out a reply 0.25 s later", d["_ledgerNew"][0]["units"], 1000)
 
-# 17. A row built under rule 2 is rebuilt under rule 3.
+# 17. A row built under rule 2 is rebuilt under the current rule.
 row2 = {"kind": "five_hour", "resetsAt": resets, "start": st, "end": end, "pct": 20, "seen": rt,
         "units": 1000, "per1": 50, "tokens": [1000, 0, 0, 0], "byModel": {"claude-sonnet-5-5": [1000, 0, 0, 0]},
         "models": ["Sonnet"], "outside": 0, "weights": "list", "at": end, "readings": 2, "rule": 2}
@@ -268,7 +270,7 @@ legacy = [{"at": st + 30, "kind": "five_hour", "pct": 0, "resetsAt": resets},
           {"at": rt, "kind": "five_hour", "pct": 20, "resetsAt": resets}]
 d = run({"s.jsonl": [q1, q2]}, [NOW - 3600], {"samples": legacy, "ledger": [row2]})
 nr = d["_ledgerNew"][0] if d["_ledgerNew"] else {}
-check("rule-2 row rebuilt under rule 3", nr.get("rule"), 3)
+check("rule-2 row rebuilt under the current rule", nr.get("rule"), RULE_NOW)
 check("rule-2 row rebuilt: legacy whole-second reading keeps the same-second reply", nr.get("per1"), 100)
 
 
@@ -426,6 +428,111 @@ d = run_in(home, [start, f"--now={NOW}"], {"samples": smp, "ledger": []})
 f3 = d["_fit"]["measured"]["fable"]
 check("weights: 3 ticks are blended toward list (used below measured)", d["_fit"]["MM"]["fable"] < f3["x"], True)
 check("weights: Haiku with no ticks stays at list", d["_fit"]["MM"]["haiku"], 1.0, tol=0)
+shutil.rmtree(home)
+
+# ---------------- review fixes (v0.5.1) ----------------
+def tick_case(spec, start):
+    """Transcripts and readings for a run of 1% ticks.  spec: one list per
+    tick of (file, model, token counts) for the calls in it."""
+    res_ = iso(start + 5 * 3600)
+    files_, smp, t, pct = {}, [{"at": start, "kind": "five_hour", "pct": 0, "resetsAt": res_}], start, 0
+    for i, calls_ in enumerate(spec):
+        t += 60
+        for j, (fname, model, tok) in enumerate(calls_):
+            files_.setdefault(fname, []).append(asst(t + j, f"k{start}-{i}-{j}", model, **tok))
+        t += 10
+        pct += 1
+        smp.append({"at": t, "kind": "five_hour", "pct": pct, "resetsAt": res_})
+    return files_, smp
+
+# 24. Model weights are measured after the token-type fit, not on list prices
+#     beside it.  The meter here counts a cache read 4x its list price and
+#     treats Opus and Sonnet alike; each tick is 1,000 meter units.  Sonnet's
+#     ticks are read-heavy, Opus's are not.  Measured on list units, Sonnet
+#     would look ~1.6x Opus and pay the read factor twice.
+#     (list units per token: Opus 5.5 in 2, out 10, read 0.1; Sonnet 5.5 in 1, out 5, read 0.05)
+opus_t = [dict(o=80, i=100), dict(o=60, i=100, r=500), dict(o=70, i=50, r=500), dict(o=90, i=50)]
+son_t = [dict(o=60, i=100, r=3000), dict(o=40, i=200, r=3000), dict(o=80, r=3000), dict(o=20, i=100, r=4000)]
+spec = []
+for i in range(8):
+    spec += [[("a.jsonl", "claude-opus-5-5", opus_t[i % 4])], [("a.jsonl", "claude-sonnet-5-5", son_t[i % 4])]]
+fl, smp = tick_case(spec, start)
+d = run(fl, [start], {"samples": smp, "ledger": []})
+check("token-type fit finds the 4x cache read", d["_fit"]["K"][3], 4.0, tol=0.01)
+m = d["_fit"]["measured"]
+check("model fit: no premium where there is none (Sonnet/Opus measured)", m["sonnet"]["x"] / m["opus"]["x"], 1.0, tol=0.02)
+check("model fit: Sonnet used at 1.0x", d["_fit"]["MM"]["sonnet"], 1.0, tol=0.02)
+
+# 25. Deleting one of two transcripts behind a tick keeps the complete copy.
+#     Opus ticks are split across a.jsonl and b.jsonl; Fable ticks are all in
+#     a.jsonl.  After b.jsonl is deleted, the Opus ticks must not shrink.
+jit = [0.5, 1.5, 0.8, 1.2]
+spec = [[("a.jsonl", "claude-opus-5-5", dict(o=round(100 * jit[i % 4]))),
+         ("b.jsonl", "claude-opus-5-5", dict(o=round(100 * jit[i % 4])))] for i in range(20)]
+spec += [[("a.jsonl", "claude-fable-5-1", dict(o=round(40 * jit[i % 4])))] for i in range(12)]
+fl, smp = tick_case(spec, start)
+home = home_with(fl)
+dd = os.path.join(home, "data")
+d = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "ledger": []})
+before = d["_fit"]["measured"]["fable"]["x"] / d["_fit"]["measured"]["opus"]["x"]
+check("partial deletion: Fable/Opus before", before, 2.0, tol=0.05)
+os.remove(os.path.join(home, ".claude", "projects", "p", "b.jsonl"))
+d = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "ledger": []})
+check("partial deletion: Fable/Opus unchanged", d["_fit"]["measured"]["fable"]["x"] / d["_fit"]["measured"]["opus"]["x"], before, tol=0.001)
+kept_t = json.load(open(os.path.join(dd, "ticks.json")))["ticks"]
+check("partial deletion: kept Opus ticks still have both calls", min((t[4] if len(t) > 4 else 0) for t in kept_t if "opus" in t[3]), 2)
+shutil.rmtree(home)
+
+# 26. Rule-3 rows priced every cache write as the 1-hour kind.  One whose
+#     transcripts remain is rebuilt; one that cannot be rebuilt stays out of
+#     the limit check.
+d = run({"s.jsonl": [q1, q2]}, [NOW - 3600], {"samples": legacy, "ledger": [dict(row2, rule=3)]})
+nr = d["_ledgerNew"][0] if d["_ledgerNew"] else {}
+check("rule-3 row rebuilt under the current rule", nr.get("rule"), RULE_NOW)
+check("rule-3 row rebuilt: 5-minute writes kept apart", {len(v) for v in nr.get("byModel", {}).values()}, {5})
+gone = dict(row2, resetsAt=iso(NOW - 3 * 86400), pct=30)
+for rule, n in ((3, 0), (RULE_NOW, 1)):
+    d = run({"x.jsonl": [asst(NOW - 60, "a", "claude-sonnet-5-5", i=10)]}, [NOW - 3600, f"--since5h={NOW - 3600}"],
+            {"samples": [], "ledger": [dict(gone, rule=rule)]})
+    check(f"limit check counts a rule-{rule} row it cannot rebuild", d["_check"]["n"], n)
+
+# 27. The History pane's limit chart uses the same rule (register.tsx).
+reg = open(os.path.join(os.path.dirname(os.path.abspath(SCAN)), "register.tsx")).read()
+m_ = re.search(r"LEDGER_RULE = (\d+)", reg)
+check("register.tsx LEDGER_RULE equals scan.py RULE", int(m_.group(1)) if m_ else None, RULE_NOW)
+
+# 28. A transcript rewritten in place at the same size, past the first 4 KB,
+#     is read again (1,000 -> 2,000 input tokens).
+home = home_with({})
+dd = os.path.join(home, "data")
+pad = [user(NOW - 500, "x" * 60) for _ in range(60)]
+write(home, "s.jsonl", pad + [asst(NOW - 100, "a", "claude-sonnet-5-5", i=1000)], NOW - 90)
+scan_home(home, dd)
+write(home, "s.jsonl", pad + [asst(NOW - 100, "a", "claude-sonnet-5-5", i=2000)], NOW - 80)
+check("same-size rewrite past 4 KB: read again", scan_home(home, dd)["listUnits"], 2000)
+shutil.rmtree(home)
+
+# 29. Daylight-saving change (New York, 1 Nov 2026 is 25 hours long).  A scan
+#     reaching back to 5 AM on 1 Nov covers from 2 Nov's midnight on, so the
+#     backfilled 1 Nov stays whole.
+from zoneinfo import ZoneInfo
+ny = ZoneInfo("America/New_York")
+E = lambda *a: datetime(*a, tzinfo=ny).timestamp()
+home = home_with({})
+dd = os.path.join(home, "data")
+write(home, "d.jsonl", [asst(E(2026, 11, 1, 10), "d1", "claude-sonnet-5-5", i=100),
+                        asst(E(2026, 11, 1, 23, 30), "d2", "claude-sonnet-5-5", i=100),
+                        asst(E(2026, 11, 2, 10), "d3", "claude-sonnet-5-5", i=100)], E(2026, 11, 2, 10, 5))
+env_ny = dict(BASE_ENV, HOME=home, TZ="America/New_York")
+def run_ny(args):
+    o = subprocess.run([sys.executable, "-I", SCAN, *map(str, args)], input="{}", capture_output=True, text=True, env=env_ny)
+    if o.returncode != 0:
+        raise SystemExit(o.stderr)
+    return json.loads(o.stdout)
+run_ny(["--backfill", f"--data-dir={dd}"])
+d = run_ny([E(2026, 11, 1, 5), f"--now={E(2026, 11, 2, 12)}", f"--data-dir={dd}"])
+check("DST: the 25-hour day keeps both calls", d["_history"]["days"].get("2026-11-01", {}).get("n"), 2)
+check("DST: the next day is covered", d["_history"]["days"].get("2026-11-02", {}).get("n"), 1)
 shutil.rmtree(home)
 
 print("\nFAILURES:", fails)
