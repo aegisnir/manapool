@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.8' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.9' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -312,7 +312,9 @@ const MODEL_ORDER = ['opus', 'sonnet', 'fable', 'mythos', 'haiku', 'other'] // b
 const GRID = '#3a3a3a'
 const INK = '#ececec'
 const EMPTY = '#2f2f2f'   // a heatmap cell with no work
-const HW = 408            // chart width; the pane scales it down to fit
+// Chart width inside its card.  Set by historyView from the pane's width, so
+// every chart is drawn at its real size (crisp labels, aligned edges).
+let HW = 408
 const FONT = `font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"`
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -380,7 +382,8 @@ type HistView = {
   text: string[]  // the same, as plain lines, for a surface without Svg
 }
 
-const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: number | null, now: number): HistView => {
+const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: number | null, now: number, width = 424): HistView => {
+  HW = Math.max(300, Math.min(1100, Math.floor(width))) - 16 // the card adds 8 px each side
   const hist = v.history
   const D = hist?.days ?? {}
   const today = new Date(now)
@@ -1557,7 +1560,15 @@ export const register: Register = on => {
     const range = ((await read($, rangeAtom)) ?? 30) as HistRange
     const last = (await read($, lastReply)) ?? (v.session?.lastSeen ? v.session.lastSeen * 1000 : null)
     const ledger = ((await $.store.get('ledger').catch(() => [])) ?? []) as LedgerRow[]
-    const hv = historyView(v, ledger, range, last, Date.now())
+    // The pane's width: its columns over the code font's advance (8.8 px, the
+    // same figure the band sizes its boxes by), less a little slack.
+    const cols = Number(e.props?.bodyColumns) || 0
+    const hv = historyView(v, ledger, range, last, Date.now(), cols > 0 ? cols * 8.8 - 12 : 424)
+    // Each chart is given its exact size, so none is centred or rescaled.
+    const dims = (svg: string) => {
+      const m = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)
+      return m ? { width: +m[1], height: +m[2] } : {}
+    }
     const pick = (r: HistRange) => (
       <Button key={`range${r}`} label={`${r}D`} {...(r === range ? { variant: 'primary' } : { plain: true, dimColor: true })}
         onPress={() => update($, rangeAtom, () => r)} />
@@ -1574,7 +1585,7 @@ export const register: Register = on => {
           <Text size="footnote" weight="semibold">{title}</Text>
           {c.right ? <Text size="footnote" color={c.rightBad ? RED : undefined} dimColor={!c.rightBad}>{c.right}</Text> : null}
         </Box>
-        <Svg source={c.svg} alt={c.alt} isInteractive />
+        <Svg source={c.svg} alt={c.alt} isInteractive {...dims(c.svg)} />
         {legend(c.legend)}
       </Box>
     ) : null
@@ -1593,7 +1604,7 @@ export const register: Register = on => {
           <Text weight="semibold">History</Text>
           <Box columnGap={1}>{([7, 30, 90] as HistRange[]).map(pick)}</Box>
         </Box>
-        {hv.tiles ? <Box marginTop={1}><Svg source={hv.tiles.svg} alt={hv.tiles.alt} /></Box> : null}
+        {hv.tiles ? <Box marginTop={1}><Svg source={hv.tiles.svg} alt={hv.tiles.alt} {...dims(hv.tiles.svg)} /></Box> : null}
         {!hv.ok ? <Text size="footnote" dimColor>No history yet.</Text> : null}
         {section('Daily', hv.daily)}
         {section('5H pace', hv.pace)}
