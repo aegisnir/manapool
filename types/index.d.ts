@@ -1,4 +1,4 @@
-// Mana Pool: the shapes the mod keeps.  Token counts only, never conversation text.
+// Mana Pool: the shapes the mod keeps.  Numbers, model names and project names, never conversation text.
 
 // Raw token counts of one span of calls.
 export type Tokens = {
@@ -35,6 +35,7 @@ export type LedgerRow = {
   kind: string; resetsAt: string; start: number; end: number; pct: number; seen: number
   units: number; per1: number | null; tokens: number[]; byModel?: Record<string, number[]>
   models: string[]; outside: number; weights: string; at: number; readings: number
+  rule?: number  // the accounting rule it was built under (scan.py RULE)
 }
 export type Fit = {
   source: string; ticks: number; r2: number | null; K: number[]; MM: Record<string, number>

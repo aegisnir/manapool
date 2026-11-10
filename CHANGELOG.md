@@ -2,6 +2,19 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## 0.5.1 (2026-11-09)
+
+Correctness fixes from a review of 0.5.0.
+
+- **Model weights no longer double-count token types.**  Each model's weight is now measured after the token-type fit is applied, so a model whose work is mostly cache reads is not adjusted twice for them.  `ticks.json` keeps each tick's work in three token groups (format 2); ticks in the old format are dropped and rebuilt from transcripts still on disk.
+- **A deleted transcript no longer shrinks kept ticks.**  A tick rebuilt from fewer calls than its kept copy leaves the kept copy in place.
+- **Ledger rule 4.**  Rows built before 5-minute cache writes were priced apart are rebuilt while their transcripts remain, and left out of the limit check and the History pane otherwise.
+- **History pane:** the Limit size chart and the 7D scale leave out rows from older ledger rules.
+- **Unpriced models stay unpriced.**  On Mythos (or any model without a list price), Next turn, the Cost pill, the cache re-cache cost and the hand-off costs read "unpriced" instead of using the previous model's price.
+- **Rewritten transcripts are re-read.**  A transcript that changed without growing is read again in full.
+- **Daylight-saving days.**  The daily history finds the next midnight by calendar date, so a 23- or 25-hour day is not cut short.
+- **Privacy wording:** the README and manual now say `scan-cache.json` stores each transcript's full path and each session's working-folder path.
+
 ## 0.5.0 (2026-11-09)
 
 - **Self-correcting model weights.**  Each model's weight comes from all its ticks added up, not a tick-by-tick check that fast models such as Fable always failed (one tick carries up to a reply of slop).  The weight in use starts at list price and moves toward the measured value as ticks build up, with no on/off threshold.  Recent ticks count more (30-day half-life), so a change in how a plan weighs a model shows up within weeks.
