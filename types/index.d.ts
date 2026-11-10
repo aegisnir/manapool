@@ -38,7 +38,8 @@ export type LedgerRow = {
 }
 export type Fit = {
   source: string; ticks: number; r2: number | null; K: number[]; MM: Record<string, number>
-  model_ticks: Record<string, number>; measured?: Record<string, { x: number; ticks: number; spread: number }>
+  model_ticks: Record<string, number>; kept?: number
+  measured?: Record<string, { x: number; ticks: number; used: number; trust: number; lo: number; hi: number }>
 }
 // One local calendar day of work (scan.py's history.json): work units at list
 // prices per model (m), per project folder (p) and per hour of the day (h),

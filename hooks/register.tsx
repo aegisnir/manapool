@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.11' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-09.12' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -22,8 +22,8 @@ const TTL_MS = 60 * 60 * 1000
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 // Units per token at list prices (1 unit = one Sonnet 5.5 input token, $2 per
 // million): input, output, cache write, cache read.  scan.py sends the weights
-// in use (per model version, fitted from your own meter ticks once there are
-// enough); this is only the fallback before the first scan.
+// in use (per model version, moved toward your own meter ticks as they build
+// up); this is only the fallback before the first scan.
 const LISTW: Record<string, number[]> = {
   fable: [4, 20, 8, 0.1], opus: [2, 10, 4, 0.1], sonnet: [1, 5, 2, 0.05], haiku: [0.05, 0.25, 0.1, 0.005],
 }
@@ -727,11 +727,11 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## Model cost on your own meter', '')
   if (fit) {
     const ms = fit.measured ?? {}
-    L.push('How much each model moves your 5H meter per list-price unit, relative to the median tick. 1.0x = exactly what its API list price says. Measured from ticks done 85%+ on one model; used for the cost figures only with 8+ ticks and a tight spread.', '')
-    L.push('| Model | Measured | Ticks | Spread | Used in costs |', '|---|---|---|---|---|')
+    L.push('How much each model moves your 5H meter per unit of list-price work, against your average tick. 1.0x = exactly what its list price says. **Measured** adds up every tick done 85%+ on one model (one tick alone is too noisy). **Used in costs** starts at 1.0x and moves toward the measured value as ticks build up, so it corrects itself as you work. Recent ticks count more (a tick 30 days old counts half), and ticks are kept 180 days, so a change in how the plan weighs a model shows up within weeks.', '')
+    L.push('| Model | Measured | Ticks | Used in costs | 90% range |', '|---|---|---|---|---|')
     for (const k of MODELS) {
       const m = ms[k]
-      L.push(`| ${cap(k)} | ${m ? `${m.x.toFixed(2)}x` : '-'} | ${fit.model_ticks[k] ?? 0} | ${m ? `±${Math.round(m.spread * 50)}%` : '-'} | ${(fit.MM[k] ?? 1).toFixed(2)}x |`)
+      L.push(`| ${cap(k)} | ${m ? `${m.x.toFixed(2)}x` : '-'} | ${fit.model_ticks[k] ?? 0} | ${(fit.MM[k] ?? 1).toFixed(2)}x | ${m?.lo != null && m.hi != null ? `${m.lo.toFixed(2)}x to ${m.hi.toFixed(2)}x` : m ? '-' : 'needs 3 ticks'} |`)
     }
     L.push('', `Token-type weights: ${fit.source === 'fit' ? `fitted from ${fit.ticks} ticks (R² ${fit.r2})` : `list prices (a type fit needs 15+ clean ticks with R² 0.5 or better; now ${fit.ticks} ticks${fit.r2 !== null ? `, R² ${fit.r2}` : ''})`}. Fewer turns on a stronger model can still make it the cheaper pick for a task; this table cannot see that.`, '')
   }

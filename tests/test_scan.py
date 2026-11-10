@@ -384,5 +384,49 @@ check("history: backfilled day kept by later scans", h["days"].get(local_day(old
 check("history: covered day unchanged by backfill", h["days"][local_day(new_t)]["n"], 2)
 shutil.rmtree(home)
 
+# ---------------- model weights: pooled, blended, kept ----------------
+# Opus and Fable ticks in one 5H window.  Each tick is 1% of the meter; Opus
+# does 2,000 units per 1%, Fable only 1,000 (so Fable moves the meter 2x per
+# unit).  The work per tick scatters (one reply of slop), the totals do not.
+def weight_case(n_opus, n_fable, start):
+    res_ = iso(start + 5 * 3600)
+    recs, smp, t, pct = [], [{"at": start, "kind": "five_hour", "pct": 0, "resetsAt": res_}], start, 0
+    jitter = [0.5, 1.5, 0.8, 1.2]
+    for i, (model, per1) in enumerate([("claude-opus-5-5", 2000)] * n_opus + [("claude-fable-5-1", 1000)] * n_fable):
+        t += 60
+        # opus 5.5 output = 10 units/token, fable 5.1 output = 25 units/token (list, 1 unit = Sonnet input)
+        per_tok = 10 if "opus" in model else 25
+        recs.append(asst(t, f"w{start}-{i}", model, o=round(per1 * jitter[i % 4] / per_tok)))
+        t += 10
+        pct += 1
+        smp.append({"at": t, "kind": "five_hour", "pct": pct, "resetsAt": res_})
+    return recs, smp
+
+start = NOW - 4 * 3600
+recs, smp = weight_case(20, 12, start)
+home = home_with({"w.jsonl": recs})
+dd = os.path.join(home, "data")
+d = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "ledger": []})
+m = d["_fit"]["measured"]
+check("weights: Fable/Opus measured from pooled ticks", m["fable"]["x"] / m["opus"]["x"], 2.0, tol=0.05)
+check("weights: scattered ticks still trusted (12 ticks)", m["fable"]["trust"] > 0.8, True)
+check("weights: used in costs follows the measurement", d["_fit"]["MM"]["fable"] / d["_fit"]["MM"]["opus"], 2.0, tol=0.15)
+check("weights: range brackets the value used", m["fable"]["lo"] < d["_fit"]["MM"]["fable"] < m["fable"]["hi"], True)
+check("weights: ticks kept in ticks.json", len(json.load(open(os.path.join(dd, "ticks.json")))["ticks"]), 32)
+# Transcripts deleted (Claude Code removes old ones): the kept ticks still count.
+os.remove(os.path.join(home, ".claude", "projects", "p", "w.jsonl"))
+d2 = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "ledger": []})
+check("weights: kept ticks survive deleted transcripts", d2["_fit"]["measured"].get("fable", {}).get("x"), m["fable"]["x"], tol=0.001)
+shutil.rmtree(home)
+
+# Few ticks: the value used stays near list price; a model with under 3 ticks is left at 1.0x.
+recs, smp = weight_case(20, 3, start)
+home = home_with({"w.jsonl": recs})
+d = run_in(home, [start, f"--now={NOW}"], {"samples": smp, "ledger": []})
+f3 = d["_fit"]["measured"]["fable"]
+check("weights: 3 ticks are blended toward list (used below measured)", d["_fit"]["MM"]["fable"] < f3["x"], True)
+check("weights: Haiku with no ticks stays at list", d["_fit"]["MM"]["haiku"], 1.0, tol=0)
+shutil.rmtree(home)
+
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)
