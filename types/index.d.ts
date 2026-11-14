@@ -48,6 +48,11 @@ export type Fit = {
 export type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number }
 // full = older days were filled in from every transcript (the one-time backfill).
 export type History = { full: boolean; days: Record<string, HistDay> }
+// Limit by time (scan.py by_time): work per 1% of 5H by local weekday (Monday
+// first) and `block`-hour slot, from kept meter ticks, model-adjusted.  A cell:
+// pooled work per 1%, ticks, % moved, and the half-width of its 90% range.
+export type ByTimeCell = { per1: number; n: number; pct: number; err: number }
+export type ByTime = { per1: number; ticks: number; block: number; grid: (ByTimeCell | null)[][] }
 export type Check = { per1: number | null; pct: number; lo: number | null; hi: number | null; n: number; outside: number }
 export type View = {
   wins: Win[]
@@ -66,6 +71,7 @@ export type View = {
   ledgerCount?: number
   unpriced?: Record<string, number>  // model id -> calls left out: not in the price table
   history?: History                  // the last 92 days, for the History pane
+  byTime?: ByTime | null             // limit size by weekday and time of day
   refreshing?: boolean
   frame?: number
   error?: string

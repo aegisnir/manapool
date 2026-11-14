@@ -535,5 +535,51 @@ check("DST: the 25-hour day keeps both calls", d["_history"]["days"].get("2026-1
 check("DST: the next day is covered", d["_history"]["days"].get("2026-11-02", {}).get("n"), 1)
 shutil.rmtree(home)
 
+# ---------------- limit by time (the History pane) ----------------
+# 30. Kept ticks only (no transcripts).  Monday 9 AM ticks hold 1,000 units per
+#     1%, Saturday 9 AM ticks 2,000.  Left out: a tick crossing noon (two
+#     4-hour blocks), a 2-hour tick, and an outside-use tick (5% moved with
+#     almost no local work).  Local time in New York, so the weekday is fixed.
+L = lambda *a: datetime(*a, tzinfo=ny).timestamp()
+home = home_with({})
+dd = os.path.join(home, "data")
+os.makedirs(dd)
+tk = []
+for i in range(10):
+    tk.append([L(2027, 1, 11, 9, i * 2), L(2027, 1, 11, 9, i * 2 + 1), 1, {"sonnet": [0, 1000, 0]}, 3])  # Mon
+    tk.append([L(2027, 1, 9, 9, i * 2), L(2027, 1, 9, 9, i * 2 + 1), 1, {"sonnet": [0, 2000, 0]}, 3])   # Sat
+tk.append([L(2027, 1, 11, 11, 50), L(2027, 1, 11, 12, 10), 1, {"sonnet": [0, 1000, 0]}, 3])  # crosses noon
+tk.append([L(2027, 1, 12, 13, 0), L(2027, 1, 12, 15, 0), 1, {"sonnet": [0, 1000, 0]}, 3])    # 2 hours
+tk.append([L(2027, 1, 11, 10, 0), L(2027, 1, 11, 10, 5), 5, {"sonnet": [0, 100, 0]}, 1])     # outside use
+with open(os.path.join(dd, "ticks.json"), "w") as f:
+    json.dump({"v": 2, "ticks": tk}, f)
+env_ny = dict(BASE_ENV, HOME=home, TZ="America/New_York")
+d = run_ny([NOW - 3600, f"--now={NOW}", f"--data-dir={dd}"])
+bt = d.get("_byTime") or {}
+g = bt.get("grid") or [[None] * 6] * 7
+check("by time: 20 ticks kept (crossing, long and outside-use left out)", bt.get("ticks"), 20)
+check("by time: median of all kept ticks", bt.get("per1"), 1500, tol=1)
+check("by time: Monday 8 AM to noon", (g[0][2] or {}).get("per1"), 1000, tol=1)
+check("by time: Saturday 8 AM to noon", (g[5][2] or {}).get("per1"), 2000, tol=1)
+check("by time: Saturday tick count", (g[5][2] or {}).get("n"), 10)
+check("by time: the noon-crossing tick fills no afternoon cell", g[0][3], None)
+check("by time: a 90% range is reported", (g[0][2] or {}).get("err", 0) > 0, True)
+shutil.rmtree(home)
+
+# 31. 7D readings are kept 120 days in the tick log, 5H readings 30.
+home = home_with({})
+dd = os.path.join(home, "data")
+os.makedirs(dd)
+old = [{"at": NOW - 60 * 86400, "kind": "seven_day", "pct": 50, "resetsAt": iso(NOW - 55 * 86400)},
+       {"at": NOW - 60 * 86400, "kind": "five_hour", "pct": 50, "resetsAt": iso(NOW - 60 * 86400 + 3600)},
+       {"at": NOW - 200 * 86400, "kind": "seven_day", "pct": 40, "resetsAt": iso(NOW - 195 * 86400)}]
+with open(os.path.join(dd, "samples.jsonl"), "w") as f:
+    for s in old:
+        f.write(json.dumps(s) + "\n")
+d = run_ny([NOW - 3600, f"--now={NOW}", f"--data-dir={dd}"])
+kinds = sorted((s["kind"], s["pct"]) for s in d.get("_samples", []))
+check("tick log: a 60-day-old 7D reading stays, 5H and 200-day 7D go", kinds, [("seven_day", 50)])
+shutil.rmtree(home)
+
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)

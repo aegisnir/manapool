@@ -330,6 +330,11 @@ const MODEL_ORDER = ['opus', 'sonnet', 'fable', 'mythos', 'haiku', 'other'] // b
 const GRID = '#3a3a3a'
 const INK = '#ececec'
 const EMPTY = '#2f2f2f'   // a heatmap cell with no work
+// Limit by time: a smaller limit than usual.  With ME (a bigger one) it is the
+// diverging pair: OKLab dE 23 to 25 under normal, deutan and protan vision;
+// 6.2:1 contrast on the card.
+const CORAL = '#f08a5d'
+const TIP_BG = '#353535', TIP_LINE = '#4d4d4d' // a tooltip box, one step above the card
 // Chart width inside its card.  Set by historyView from the pane's width, so
 // every chart is drawn at its real size (crisp labels, aligned edges).
 let HW = 408
@@ -373,11 +378,51 @@ const gradDef = (id: string, hex: string, vertical: boolean) => {
   const dir = vertical ? 'x1="0" x2="0" y1="1" y2="0"' : 'x1="0" x2="1" y1="0" y2="0"'
   return `<linearGradient id="${id}" ${dir}><stop offset="0" stop-color="${hexOk(shiftStart(o))}"/><stop offset="1" stop-color="${hexOk(shiftEnd(o))}"/></linearGradient>`
 }
+// Hover.  The pane draws each chart in a sandboxed frame that runs CSS but no
+// scripts (Svg isInteractive), so the crosshair and tooltip are CSS :hover
+// alone: each hover group is an invisible hit area plus marks and a tooltip
+// that are hidden until the pointer is over that area.  The tooltip ignores
+// the pointer, so it never steals the hover from the area under it.  Hover
+// groups go after every visible mark, so a tooltip is drawn on top.
+const HOVER_CSS = '<style>.h .hv{opacity:0}.h:hover .hv{opacity:1}.hv{pointer-events:none}</style>'
+// Numbers are cut to two decimals (attribute values only, never text): a
+// chart with a hover target per cell runs close to the 131,072-character
+// limit an Svg may have, and 188.91666666666669 says no more than 188.91.
+const trim = (body: string) => body.replace(/="([^"]*)"/g, (_m, v: string) => `="${v.replace(/(\d\.\d\d)\d+/g, '$1')}"`)
 const svgDoc = (h: number, body: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${HW + 16} ${h + 16}" width="${HW + 16}" height="${h + 16}">` +
-  `<rect width="${HW + 16}" height="${h + 16}" rx="10" fill="${SURFACE}"/><g transform="translate(8 8)" ${FONT} font-size="10">${body}</g></svg>`
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${HW + 16} ${h + 16}" width="${HW + 16}" height="${h + 16}">${HOVER_CSS}` +
+  `<rect width="${HW + 16}" height="${h + 16}" rx="10" fill="${SURFACE}"/><g transform="translate(8 8)" ${FONT} font-size="10">${trim(body)}</g></svg>`
 const label = (x: number, y: number, s: string, anchor = 'start', col = DIM) =>
   `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${col}">${esc(s)}</text>`
+// A tooltip beside the point (x, y): the first line in ink, the rest dim.  It
+// flips to the left near the right edge and stays inside the chart's height h
+// (the frame clips anything outside).  Width is estimated from the text, as
+// SVG cannot measure it without a script.
+const tipBox = (x: number, y: number, h: number, lines: string[]) => {
+  const w = Math.max(...lines.map(l => l.length)) * 5.7 + 16, th = lines.length * 13 + 7
+  let tx = x + 10
+  if (tx + w > HW) tx = x - 10 - w
+  tx = Math.max(-6, tx)
+  const ty = Math.max(-6, Math.min(y, h - th + 6))
+  return `<rect x="${tx}" y="${ty}" width="${w}" height="${th}" rx="5" fill="${TIP_BG}" stroke="${TIP_LINE}"/>` +
+    lines.map((l, i) => `<text x="${tx + 8}" y="${ty + 15 + i * 13}" fill="${i ? DIM : INK}"${i ? '' : ' font-weight="600"'}>${esc(l)}</text>`).join('')
+}
+// One hover group: `hit` is the invisible area, `marks` (crosshair, ring,
+// outline) and `tip` show while the pointer is over it.  The hidden state is
+// also an attribute, so a surface that drops the <style> block (or draws the
+// chart as a plain image) shows no stray tooltips; the CSS rule outranks it
+// on hover.
+const hover = (hit: string, marks: string, tip: string) => `<g class="h">${hit}<g class="hv" opacity="0">${marks}${tip}</g></g>`
+const hitRect = (x: number, y: number, w: number, h: number) =>
+  `<rect x="${x}" y="${y}" width="${Math.max(1, w)}" height="${Math.max(1, h)}" fill="transparent"/>`
+const crossX = (x: number, y0: number, y1: number) =>
+  `<line x1="${x}" x2="${x}" y1="${y0}" y2="${y1}" stroke="${INK}" stroke-opacity="0.55" stroke-dasharray="2 2"/>`
+const ring = (x: number, y: number, col = INK) => `<circle cx="${x}" cy="${y}" r="5.5" fill="none" stroke="${col}" stroke-width="1.5"/>`
+// A moment for a tooltip: "Sat, Nov 14, 11:00 AM EST" (the computer's own time zone).
+const stamp = (ms: number) =>
+  new Date(ms).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+const hm = (ms: number) => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+const longDay = (k: string) => dayOfKey(k).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
 const gridLine = (x0: number, y: number, s: string) =>
   `<line x1="${x0}" x2="${HW}" y1="${y}" y2="${y}" stroke="${GRID}"/>${label(x0 - 4, y + 3, s, 'end')}`
 // A bar grown up from the baseline: top corners rounded, bottom flat.
@@ -396,7 +441,8 @@ type Chart = { svg: string; alt: string; right?: string; rightBad?: boolean; leg
 type HistView = {
   ok: boolean; full: boolean; unit: string
   tiles: { svg: string; alt: string } | null
-  daily: Chart | null; pace: Chart | null; limit: Chart | null; projects: Chart | null; hours: Chart | null; reread: Chart | null
+  daily: Chart | null; pace: Chart | null; pace7: Chart | null; limit: Chart | null; byTime: Chart | null
+  projects: Chart | null; hours: Chart | null; reread: Chart | null
   text: string[]  // the same, as plain lines, for a surface without Svg
 }
 
@@ -469,13 +515,12 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
     let out = `<defs>${present.map(m => gradDef(`d${m}`, MODEL_COL[m], true)).join('')}</defs>`
     out += [0, max / 2, max].map(t => gridLine(x0, sy(t), tick(t))).join('')
-    let peak = -1
+    let peak = -1, hv = ''
     totals.forEach((t, i) => { if (t > 0 && (peak < 0 || t > totals[peak])) peak = i })
     keys.forEach((k, i) => {
       const b = D[k]
       const x = x0 + i * sx + gap / 2
       const parts = present.map(m => [m, b?.m[m] ?? 0] as const).filter(p => p[1] > 0)
-      const tip = `${shortDay(k)} · ${valTxt(totals[i])}${parts.length ? ' · ' + parts.map(([m, u]) => `${cap(m)} ${valTxt(u)}`).join(', ') : ''}`
       let y = base, segs = ''
       parts.forEach(([m, u], j) => {
         const h = (val(u) / max) * (base - top)
@@ -485,12 +530,17 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         segs += isTop ? upBar(x, y, bw, Math.max(0.5, h - (j > 0 ? 1 : 0)), `url(#d${m})`)
           : `<rect x="${x}" y="${y + 1}" width="${bw}" height="${Math.max(0.5, h - 1)}" fill="url(#d${m})"/>`
       })
-      // a full-height hover target, bigger than the bar
-      out += `<g><title>${esc(tip)}</title><rect x="${x0 + i * sx}" y="${top}" width="${sx}" height="${base - top}" fill="transparent"/>${segs}</g>`
+      out += segs
+      // hover: the whole column, so a thin or empty day is easy to point at
+      const cx = x0 + i * sx + sx / 2
+      hv += hover(hitRect(x0 + i * sx, top, sx, base - top), crossX(cx, top, base),
+        tipBox(cx, top, H, totals[i] > 0 ? [longDay(k), `${valTxt(totals[i])}${per7 > 0 ? ` · ${fmt(totals[i])} units` : ''}`,
+          ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), `${b?.n ?? 0} calls`] : [longDay(k), 'No work']))
     })
     if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(totals[peak])) - 4, valTxt(totals[peak]).replace('~', ''), 'middle', INK)
     const every = Math.ceil(keys.length / 5)
     keys.forEach((k, i) => { if ((keys.length - 1 - i) % every === 0) out += label(x0 + i * sx + sx / 2, H - 2, shortDay(k), 'middle') })
+    out += hv
     const sum = totals.reduce((a, b) => a + b, 0)
     daily = {
       svg: svgDoc(H, out), alt: `Daily work over ${range} days, ${valTxt(sum)} in all`,
@@ -515,9 +565,10 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     let out = [0, 50, 100].map(t => gridLine(x0, sy(t), `${t}%`)).join('')
     const nowMin = Math.max(0, Math.min(300, (now / 1000 - startOf(w5.resetsAt)) / 60))
     const pctNow = d.est(w5)
+    let p25: number[] = [], p50: number[] = [], p75: number[] = []
     if (past.length >= 3) {
       const cols = grid.map(m => past.map(([ra, ss]) => at(ss, startOf(ra), m)))
-      const p25 = cols.map(c => quant(c, 0.25)), p50 = cols.map(c => quant(c, 0.5)), p75 = cols.map(c => quant(c, 0.75))
+      p25 = cols.map(c => quant(c, 0.25)); p50 = cols.map(c => quant(c, 0.5)); p75 = cols.map(c => quant(c, 0.75))
       out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p75[i])}`).join(' L')} L${[...grid].reverse().map((m, i) => `${sx(m)},${sy(p25[grid.length - 1 - i])}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
       out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p50[i])}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
     }
@@ -538,6 +589,21 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     out += `<circle cx="${sx(nowMin)}" cy="${sy(pctNow)}" r="4" fill="${ME}" stroke="${SURFACE}" stroke-width="2"><title>${esc(`Now · ${pctTxt(pctNow)}`)}</title></circle>`
     out += label(sx(nowMin) + (nowMin > 200 ? -8 : 8), sy(pctNow) - 8, `${Math.round(pctNow)}% now`, nowMin > 200 ? 'end' : 'start', INK)
     for (let h = 0; h <= 5; h++) out += label(sx(h * 60), H - 2, `${h}h`, 'middle')
+    // hover: one column per 10 minutes
+    {
+      const ss = byWin.get(w5.resetsAt) ?? [], st = startOf(w5.resetsAt), cw = sx(10) - sx(0)
+      grid.forEach((m, i) => {
+        const x = sx(m), lines = [`${Math.floor(m / 60)}h ${pad2(m % 60)}m · ${hm((st + m * 60) * 1000)}`]
+        let mk = crossX(x, top, base)
+        if (m <= nowMin) {
+          const p = m >= nowMin - 5 ? pctNow : at(ss, st, m)
+          lines.push(`This window ${Math.round(p)}%`)
+          mk += ring(x, sy(p), ME)
+        } else if (rw.r > 0) lines.push(`Projected ${Math.round(Math.min(100, pctNow + (rw.r * (m - nowMin)) / 60))}%`)
+        if (p50.length) lines.push(`Usual ${Math.round(p50[i])}%`, `Middle half ${Math.round(p25[i])} to ${Math.round(p75[i])}%`)
+        out += hover(hitRect(x - cw / 2, top, cw, base - top), mk, tipBox(x, top, H, lines))
+      })
+    }
     const usual = past.length >= 3 ? quant(past.map(([ra, ss]) => at(ss, startOf(ra), nowMin)), 0.5) : null
     pace = {
       svg: svgDoc(H, out), alt: `5H window at ${Math.round(pctNow)}%${usual !== null ? `, usual ${Math.round(usual)}% by now` : ''}`,
@@ -546,6 +612,90 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       legend: [{ name: 'This window', col: ME }, ...(past.length >= 3 ? [{ name: `Usual (middle half of ${past.length} windows)`, col: HIST }] : [])],
     }
     text.push(`5H ${Math.round(pctNow)}% · ${pace.right}`)
+  }
+
+  // --- 7D pace: this week against even pace and past weeks ---
+  // Drawn like 5H pace.  With 3+ past weeks it shows their middle half as a
+  // band; until then last week as a grey line.  The even-pace line (100% at
+  // reset) is always there: it is what "Per day left" in the tiles spreads out.
+  let pace7: Chart | null = null
+  if (w7?.resetsAt) {
+    const H = 124, x0 = 34, top = 8, base = H - 16, DAY = 86400
+    const sx = (dd: number) => x0 + (dd / 7) * (HW - x0 - 4), sy = (p: number) => base - (Math.min(100, p) / 100) * (base - top)
+    const byWin = new Map<string, Sample[]>()
+    for (const s of v.samples) if (s.kind === 'seven_day' && s.resetsAt) byWin.set(s.resetsAt, [...(byWin.get(s.resetsAt) ?? []), s])
+    const startOf = (ra: string) => Date.parse(ra) / 1000 - SPAN.seven_day
+    const at = (ss: Sample[], st: number, dd: number) => ss.reduce((p, s) => (s.at <= st + dd * DAY ? Math.max(p, s.pct) : p), 0)
+    // a past week counts only if its readings start within its first 12 hours:
+    // one picked up mid-week would read 0% for the days before
+    const past = [...byWin.entries()].filter(([ra, ss]) => ra !== w7.resetsAt && Date.parse(ra) <= now && ss.length >= 2)
+      .sort((a, b) => Date.parse(a[0]) - Date.parse(b[0])).slice(-12)
+    const full = past.filter(([ra, ss]) => Math.min(...ss.map(s => s.at)) - startOf(ra) <= DAY / 2)
+    const grid = Array.from({ length: 29 }, (_, i) => i / 4) // every 6 hours
+    let out = [0, 50, 100].map(t => gridLine(x0, sy(t), `${t}%`)).join('')
+    const st = startOf(w7.resetsAt)
+    const nowD = Math.max(0, Math.min(7, (now / 1000 - st) / DAY))
+    const pctNow = d.est(w7)
+    let p25: number[] = [], p50: number[] = [], p75: number[] = []
+    if (full.length >= 3) {
+      const cols = grid.map(dd => full.map(([ra, ss]) => at(ss, startOf(ra), dd)))
+      p25 = cols.map(c => quant(c, 0.25)); p50 = cols.map(c => quant(c, 0.5)); p75 = cols.map(c => quant(c, 0.75))
+      out += `<path d="M${grid.map((dd, i) => `${sx(dd)},${sy(p75[i])}`).join(' L')} L${[...grid].reverse().map((dd, i) => `${sx(dd)},${sy(p25[grid.length - 1 - i])}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
+      out += `<path d="M${grid.map((dd, i) => `${sx(dd)},${sy(p50[i])}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
+    }
+    out += `<line x1="${sx(0)}" y1="${sy(0)}" x2="${sx(7)}" y2="${sy(100)}" stroke="${DIM}" stroke-dasharray="4 4"/>`
+    // each reading holds until the next one: a step line
+    const steps = (pts: [number, number][]) => {
+      let path = `M${sx(pts[0][0])},${sy(pts[0][1])}`
+      for (let i = 1; i < pts.length; i++) path += ` L${sx(pts[i][0])},${sy(pts[i - 1][1])} L${sx(pts[i][0])},${sy(pts[i][1])}`
+      return path
+    }
+    const lastWk = past[past.length - 1]
+    const lastPts = lastWk ? lastWk[1].map(s => [(s.at - startOf(lastWk[0])) / DAY, s.pct] as [number, number]).filter(([dd]) => dd >= 0 && dd <= 7).sort((a, b) => a[0] - b[0]) : []
+    const showLast = !p50.length && lastPts.length >= 2
+    if (showLast) out += `<path d="${steps([...lastPts, [7, lastPts[lastPts.length - 1][1]]])}" fill="none" stroke="${HIST}" stroke-width="2" stroke-linejoin="round"/>`
+    const ss7 = byWin.get(w7.resetsAt) ?? []
+    const cur = ss7.map(s => [(s.at - st) / DAY, s.pct] as [number, number]).filter(([dd]) => dd >= 0 && dd <= nowD).sort((a, b) => a[0] - b[0])
+    out += `<defs>${gradDef('p7', ME, false)}</defs><path d="${steps([[0, 0], ...cur, [nowD, pctNow]])}" fill="none" stroke="url(#p7)" stroke-width="2" stroke-linejoin="round"/>`
+    const rw = d.runway(w7)
+    if (rw.r > 0 && nowD < 7) {
+      const endD = rw.bad ? Math.min(7, nowD + rw.leftMs / 1000 / DAY) : 7
+      const endP = Math.min(100, pctNow + rw.r * (endD - nowD) * 24)
+      out += `<path d="M${sx(nowD)},${sy(pctNow)} L${sx(endD)},${sy(endP)}" fill="none" stroke="${ME}" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>`
+      if (rw.bad) out += `<line x1="${sx(endD)}" x2="${sx(endD)}" y1="${sy(100)}" y2="${base}" stroke="${RED}" stroke-dasharray="2 3"/>`
+    }
+    out += `<circle cx="${sx(nowD)}" cy="${sy(pctNow)}" r="4" fill="${ME}" stroke="${SURFACE}" stroke-width="2"/>`
+    out += label(sx(nowD) + (nowD > 4.7 ? -8 : 8), sy(pctNow) - 8, `${Math.round(pctNow)}% now`, nowD > 4.7 ? 'end' : 'start', INK)
+    for (let i = 0; i <= 7; i++) out += label(sx(i), H - 2, new Date((st + i * DAY) * 1000).toLocaleDateString('en-US', { weekday: 'short' }), 'middle')
+    // hover: one column per 6 hours
+    const cw = sx(0.25) - sx(0)
+    grid.forEach((dd, i) => {
+      const x = sx(dd), lines = [stamp((st + dd * DAY) * 1000)]
+      let mk = crossX(x, top, base)
+      if (dd <= nowD) {
+        const p = dd >= nowD - 0.1 ? pctNow : at(ss7, st, dd)
+        lines.push(`This week ${Math.round(p)}%`)
+        mk += ring(x, sy(p), ME)
+      } else if (rw.r > 0) lines.push(`Projected ${Math.round(Math.min(100, pctNow + rw.r * (dd - nowD) * 24))}%`)
+      lines.push(`Even pace ${Math.round((dd / 7) * 100)}%`)
+      if (p50.length) lines.push(`Usual ${Math.round(p50[i])}%`, `Middle half ${Math.round(p25[i])} to ${Math.round(p75[i])}%`)
+      else if (showLast) {
+        const lp = lastPts.filter(q => q[0] <= dd)
+        lines.push(lp.length ? `Last week ${Math.round(lp[lp.length - 1][1])}%` : 'Last week: no reading yet')
+      }
+      out += hover(hitRect(x - cw / 2, top, cw, base - top), mk, tipBox(x, top, H, lines))
+    })
+    const even = (nowD / 7) * 100
+    const usual = p50.length ? quant(full.map(([ra, ss]) => at(ss, startOf(ra), nowD)), 0.5) : null
+    pace7 = {
+      svg: svgDoc(H, out), alt: `7D window at ${Math.round(pctNow)}%, even pace ${Math.round(even)}% by now${usual !== null ? `, usual ${Math.round(usual)}%` : ''}`,
+      right: rw.bad ? `Runs out in ${dur(rw.leftMs)}` : usual !== null ? `Usual ${Math.round(usual)}% by now` : `Even pace ${Math.round(even)}% by now`,
+      rightBad: rw.bad,
+      legend: [{ name: 'This week', col: ME },
+        ...(p50.length ? [{ name: `Usual (middle half of ${full.length} weeks)`, col: HIST }] : showLast ? [{ name: 'Last week', col: HIST }] : []),
+        { name: 'Dashed: even pace', col: DIM }],
+    }
+    text.push(`7D ${Math.round(pctNow)}% · ${pace7.right}`)
   }
 
   // --- Limit size: work per 1% of 5H, one dot per finished window ---
@@ -564,11 +714,27 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       out += `<path d="M${rows.map((r, i) => `${sx(i)},${sy(r.per1 as number)}`).join(' L')}" fill="none" stroke="${GRID}" stroke-width="2"/>`
       rows.forEach((r, i) => {
         const s = sure(r)
-        const tip = `${day(r.start * 1000)} · ${r.pct}% used · ${fmt(r.per1 as number)} per 1%${s ? '' : ' · low confidence'}`
-        out += `<g><title>${esc(tip)}</title><circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="10" fill="transparent"/>` +
-          `<circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="4" fill="${s ? INK : SURFACE}" stroke="${s ? SURFACE : DIM}" stroke-width="${s ? 2 : 1.5}"/></g>`
+        out += `<circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="4" fill="${s ? INK : SURFACE}" stroke="${s ? SURFACE : DIM}" stroke-width="${s ? 2 : 1.5}"/>`
       })
-      out += label(sx(0), H - 2, shortDay(keyOfDay(new Date(rows[0].start * 1000)))) + label(sx(rows.length - 1), H - 2, shortDay(keyOfDay(new Date(rows[rows.length - 1].start * 1000))), 'end')
+      // a date under the first window of each day, a tick mark on every new
+      // day; a label is skipped where it would run into the one before
+      let lastKey = '', lastX = -99
+      rows.forEach((r, i) => {
+        const k = keyOfDay(new Date(r.start * 1000))
+        if (k === lastKey) return
+        lastKey = k
+        out += `<line x1="${sx(i)}" x2="${sx(i)}" y1="${base}" y2="${base + 3}" stroke="${DIM}"/>`
+        if (sx(i) - lastX >= 40 && sx(i) <= HW - 14) { out += label(sx(i), H - 2, shortDay(k), 'middle'); lastX = sx(i) }
+      })
+      // hover: one column per window
+      const cw = rows.length > 1 ? sx(1) - sx(0) : 20
+      rows.forEach((r, i) => {
+        const y = sy(r.per1 as number)
+        const lines = [`${stamp(r.start * 1000).replace(/ [A-Z]{2,5}$/, '')} to ${hm(r.end * 1000)}`, `${r.pct}% used${sure(r) ? '' : ' · low confidence'}`,
+          `${fmt(r.per1 as number)} work units per 1%`, ...(r.models?.length ? [r.models.join(' + ')] : []),
+          ...(r.outside > 0 ? [`${r.outside}% outside use`] : [])]
+        out += hover(hitRect(sx(i) - cw / 2, top, cw, base - top), crossX(sx(i), top, base) + ring(sx(i), y), tipBox(sx(i), top, H, lines))
+      })
       let right = `${rows.length} windows · too few to judge`
       if (conf.length >= 8) { // fewer reliable windows than this is noise
         const recent = median(conf.slice(-3)), chg = med > 0 ? (recent - med) / med : 0
@@ -583,6 +749,55 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     }
   }
 
+  // --- Limit by time: work per 1% of 5H by weekday and 4-hour block ---
+  // From scan.py's by_time(): every kept tick (180 days, so the range buttons
+  // do not change it), model-adjusted.  Each cell against the median of all
+  // ticks: purple a bigger limit, coral a smaller one, deeper the further off
+  // (full colour at 20%).  A cell whose 90% range is wider than 15% is drawn
+  // as an outline only: too few ticks to trust its colour.
+  let byTime: Chart | null = null
+  {
+    const bt = v.byTime
+    if (bt && bt.per1 > 0 && bt.grid?.some(r => r.some(Boolean))) {
+      const blocks = bt.grid[0].length, bh = 24 / blocks
+      const x0 = 32, cell = (HW - x0) / blocks, ch = 13, H = 7 * (ch + 2) + 14
+      let out = '', hv = ''
+      bt.grid.forEach((row, r) => {
+        const y = r * (ch + 2)
+        out += label(x0 - 6, y + 10, WEEK[r], 'end')
+        row.forEach((c, b) => {
+          const x = x0 + b * cell + 1, w = cell - 2
+          if (!c) { out += `<rect x="${x}" y="${y}" width="${w}" height="${ch}" rx="2" fill="${EMPTY}"/>`; return }
+          const diff = c.per1 / bt.per1 - 1, thin = c.err / c.per1 > 0.15
+          const col = mix(EMPTY, diff >= 0 ? ME : CORAL, 0.3 + 0.7 * Math.min(1, Math.abs(diff) / 0.2))
+          out += thin
+            ? `<rect x="${x + 0.75}" y="${y + 0.75}" width="${w - 1.5}" height="${ch - 1.5}" rx="2" fill="none" stroke="${col}" stroke-width="1.5"/>`
+            : `<rect x="${x}" y="${y}" width="${w}" height="${ch}" rx="2" fill="${col}"/>`
+          const sign = diff >= 0.005 ? '+' : diff <= -0.005 ? '−' : ''
+          hv += hover(hitRect(x, y, w, ch), `<rect x="${x - 1}" y="${y - 1}" width="${w + 2}" height="${ch + 2}" rx="3" fill="none" stroke="${INK}" stroke-width="1.5"/>`,
+            tipBox(x + w / 2, y + ch + 4, H, [`${WEEK[r]} ${hourTxt(b * bh)} to ${hourTxt(((b + 1) * bh) % 24)}`,
+              `${sign}${Math.abs(Math.round(diff * 100))}% vs median`, `${fmt(c.per1)} work units per 1%`,
+              `${c.n} ticks, ${c.pct}% moved`, `Likely range ±${Math.round((c.err / c.per1) * 100)}%${thin ? ', too wide to judge' : ''}`]))
+        })
+      })
+      for (let b = 0; b < blocks; b += blocks > 6 ? 2 : 1) out += label(x0 + b * cell + 1, H - 1, hourTxt(b * bh).replace(' ', '').toLowerCase())
+      // the strongest trustworthy cell, for the header
+      let best: { d: number; name: string } | null = null
+      bt.grid.forEach((row, r) => row.forEach((c, b) => {
+        if (!c || c.err / c.per1 > 0.15) return
+        const d_ = c.per1 / bt.per1 - 1
+        if (!best || Math.abs(d_) > Math.abs(best.d)) best = { d: d_, name: `${WEEK[r]} ${hourTxt(b * bh).replace(' ', '').toLowerCase()}` }
+      }))
+      const b_ = best as { d: number; name: string } | null
+      const right = b_ && Math.abs(b_.d) >= 0.05 ? `${b_.name} ${b_.d > 0 ? '+' : '−'}${Math.round(Math.abs(b_.d) * 100)}%` : `${bt.ticks} ticks · no clear pattern yet`
+      byTime = {
+        svg: svgDoc(H, out + hv), alt: `Work per 1% of 5H by weekday and ${bh}-hour block against the median of ${bt.ticks} ticks`, right,
+        legend: [{ name: 'Smaller limit', col: CORAL }, { name: 'Bigger limit', col: ME }, { name: 'Outline: too few ticks', col: DIM }],
+      }
+      text.push(`Limit by time: ${right}`)
+    }
+  }
+
   // --- Projects: where the work went ---
   let projects: Chart | null = null
   {
@@ -594,15 +809,20 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const rows = rest > 0 ? [...topN, ['Other', rest] as [string, number]] : topN
       const rowH = 22, H = rows.length * rowH, lx = 126
       const max = Math.max(...rows.map(r => r[1]))
-      let out = `<defs>${gradDef('pj', ME, false)}${gradDef('po', MODEL_COL.other, false)}</defs>`
+      let out = `<defs>${gradDef('pj', ME, false)}${gradDef('po', MODEL_COL.other, false)}</defs>`, hv = ''
+      const sum = all.reduce((a, b) => a + b[1], 0)
       rows.forEach(([name, u], i) => {
         const y = i * rowH + 4, w = Math.max(2, (u / max) * (HW - lx - 52))
         const nm = name.length > 20 ? name.slice(0, 19) + '…' : name
-        out += `<g><title>${esc(`${name} · ${valTxt(u)}`)}</title>` + `<text x="0" y="${y + 11}" fill="${INK}" font-size="11">${esc(nm)}</text>` +
+        out += `<text x="0" y="${y + 11}" fill="${INK}" font-size="11">${esc(nm)}</text>` +
           rightBar(lx, y, w, 14, name === 'Other' && i === rows.length - 1 && rest > 0 ? 'url(#po)' : 'url(#pj)') +
-          `<text x="${lx + w + 6}" y="${y + 11}" fill="${DIM}" font-size="11">${esc(valTxt(u))}</text></g>`
+          `<text x="${lx + w + 6}" y="${y + 11}" fill="${DIM}" font-size="11">${esc(valTxt(u))}</text>`
+        const isRest = name === 'Other' && i === rows.length - 1 && rest > 0
+        hv += hover(hitRect(-4, y - 3, HW + 4, rowH), `<rect x="-4" y="${y - 3}" width="${HW + 4}" height="${rowH}" rx="4" fill="${INK}" fill-opacity="0.07"/>`,
+          tipBox(lx + w + 40, y - 3, Math.max(H, 48), [isRest ? `Other (${all.length - 5} folders)` : name, `${valTxt(u)} · ${Math.round((u / sum) * 100)}% of work`, `${fmt(u)} work units`]))
       })
-      projects = { svg: svgDoc(H, out), alt: `Top projects: ${rows.map(r => `${r[0]} ${valTxt(r[1])}`).join(', ')}`, right: `${unit}, ${range} days` }
+      out += hv
+      projects = { svg: svgDoc(Math.max(H, 48), out), alt: `Top projects: ${rows.map(r => `${r[0]} ${valTxt(r[1])}`).join(', ')}`, right: `${unit}, ${range} days` }
       text.push(`Projects: ${rows.slice(0, 3).map(r => `${r[0]} ${valTxt(r[1])}`).join(' · ')}`)
     }
   }
@@ -620,14 +840,19 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const max = Math.max(...M.flat())
     if (max > 0) {
       const x0 = 32, cell = (HW - x0) / 24, ch = 13, H = 7 * (ch + 2) + 14
-      let out = ''
+      let out = '', hv = ''
+      const all = M.flat().reduce((a, b) => a + b, 0)
       M.forEach((row, r) => {
         out += label(x0 - 6, r * (ch + 2) + 10, WEEK[r], 'end')
         row.forEach((u, h) => {
-          const t = u / max
-          out += `<rect x="${x0 + h * cell + 1}" y="${r * (ch + 2)}" width="${cell - 2}" height="${ch}" rx="2" fill="${t < 0.02 ? EMPTY : ME}" fill-opacity="${t < 0.02 ? 1 : (0.18 + t * 0.82).toFixed(2)}"><title>${esc(`${WEEK[r]} ${hourTxt(h)} · ${valTxt(u)}`)}</title></rect>`
+          const t = u / max, x = x0 + h * cell + 1, y = r * (ch + 2)
+          out += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${ch}" rx="2" fill="${t < 0.02 ? EMPTY : ME}" fill-opacity="${t < 0.02 ? 1 : (0.18 + t * 0.82).toFixed(2)}"/>`
+          hv += hover(hitRect(x - 1, y - 1, cell, ch + 2), `<rect x="${x - 1}" y="${y - 1}" width="${cell}" height="${ch + 2}" rx="3" fill="none" stroke="${INK}" stroke-width="1.5"/>`,
+            tipBox(x + cell / 2, y + ch + 4, H, [`${WEEK[r]} ${hourTxt(h)} to ${hourTxt((h + 1) % 24)}`, u > 0 ? valTxt(u) : 'No work',
+              ...(u > 0 ? [`${fmt(u)} work units · ${Math.round((u / all) * 100)}% of ${range} days`] : [])]))
         })
       })
+      out += hv
       for (const h of [0, 6, 12, 18]) out += label(x0 + h * cell + 1, H - 1, hourTxt(h).replace(' ', '').toLowerCase())
       hours = { svg: svgDoc(H, out), alt: 'Work by weekday and hour of day', right: 'by hour, local time', legend: [{ name: 'Less', col: mix(SURFACE, ME, 0.3) }, { name: 'More', col: ME }] }
     }
@@ -641,15 +866,18 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const max = niceMax(val(Math.max(...totals, 0)) * 1.05)
     const sy = (x: number) => (x / max) * (base - top)
     const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
-    let out = `<defs>${gradDef('rn', ME, true)}</defs>` + [0, max / 2, max].map(t => gridLine(x0, base - sy(t), tick(t))).join('')
+    let out = `<defs>${gradDef('rn', ME, true)}</defs>` + [0, max / 2, max].map(t => gridLine(x0, base - sy(t), tick(t))).join(''), hv = ''
     keys.forEach((k, i) => {
-      const b = D[k], t = totals[i]
+      const b = D[k], t = totals[i], cx = x0 + i * sx + sx / 2
+      hv += hover(hitRect(x0 + i * sx, top, sx, base - top), crossX(cx, top, base),
+        tipBox(cx, top, H, b && t > 0
+          ? [longDay(k), `Re-reading ${Math.round((b.r / t) * 100)}% · ${valTxt(b.r)}`, `New work ${valTxt(t - b.r)}`, `Total ${valTxt(t)}`]
+          : [longDay(k), 'No work']))
       if (!b || t <= 0) return
       const hh = sy(val(b.r)), nh = sy(val(t - b.r)), x = x0 + i * sx + gap / 2
-      out += `<g><title>${esc(`${shortDay(k)} · ${Math.round((b.r / t) * 100)}% re-reading`)}</title><rect x="${x0 + i * sx}" y="${top}" width="${sx}" height="${base - top}" fill="transparent"/>` +
-        `<rect x="${x}" y="${base - hh}" width="${bw}" height="${hh}" fill="${HIST}"/>` + upBar(x, base - hh - nh, bw, Math.max(0.5, nh - 1), 'url(#rn)') + '</g>'
+      out += `<rect x="${x}" y="${base - hh}" width="${bw}" height="${hh}" fill="${HIST}"/>` + upBar(x, base - hh - nh, bw, Math.max(0.5, nh - 1), 'url(#rn)')
     })
-    out += label(x0 + 2, H - 2, shortDay(keys[0])) + label(HW, H - 2, 'Today', 'end')
+    out += label(x0 + 2, H - 2, shortDay(keys[0])) + label(HW, H - 2, 'Today', 'end') + hv
     const R = keys.reduce((a, k) => a + (D[k]?.r ?? 0), 0), T = totals.reduce((a, b) => a + b, 0)
     if (T > 0) {
       reread = {
@@ -659,7 +887,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     }
   }
 
-  return { ok: Object.keys(D).length > 0, full: !!hist?.full, unit, tiles, daily, pace, limit, projects, hours, reread, text }
+  return { ok: Object.keys(D).length > 0, full: !!hist?.full, unit, tiles, daily, pace, pace7, limit, byTime, projects, hours, reread, text }
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +964,10 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Tiles**: **7D used**; **Per day left**, what is left of 7D spread evenly over the days until it resets; **Re-reading**, the share of the last 7 days spent re-reading the conversation.')
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading).')
   L.push('- **5H pace**: this window\'s readings against the middle half of your past windows, with the projection to 100%.')
-  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
+  L.push('- **7D pace**: this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
+  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window, dated by the day it started. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
+  L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Purple is a bigger limit, coral a smaller one. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and outside use. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done.')
+  L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
   L.push('- **Re-reading**: the share of work spent on cache reads, the old conversation sent again on every call. (The turn strip on the band counts a turn\'s re-reading more exactly.)')
   L.push('- Work here is weighed at plain list prices, like the ledger, so days stay comparable when the fitted weights change.')
@@ -771,7 +1002,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
 
   L.push('## Where things live', '')
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
-  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript\'s full path and the full path of the folder each session ran in), `ticks.json` (each meter tick\'s percent and work per model, kept 180 days) and `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts, times, model names and file paths; no conversation text.')
+  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock; 5H readings kept 30 days, 7D readings 120), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript\'s full path and the full path of the folder each session ran in), `ticks.json` (each meter tick\'s percent and work per model, kept 180 days) and `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts, times, model names and file paths; no conversation text.')
   L.push('- **Refreshes:** about 1.5 seconds after each of your turns and each meter tick, every 2 minutes otherwise; the cache clock redraws every 30 seconds.')
   L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} history\` opens the History pane (also the ▤ button on the band). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
   return L.join('\n')
@@ -1020,7 +1251,7 @@ export const register: Register = on => {
         compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
         session: sums._session ?? undefined, weights: sums._weights, long: sums._long, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
-        unpriced: sums._unpriced, history: sums._history,
+        unpriced: sums._unpriced, history: sums._history, byTime: sums._byTime ?? undefined,
       }
       await io.show(() => nv)
       // So the next session (and this one after a reload) can draw at once.
@@ -1632,7 +1863,9 @@ export const register: Register = on => {
         {!hv.ok ? <Text size="footnote" dimColor>No history yet.</Text> : null}
         {section('Daily', hv.daily)}
         {section('5H pace', hv.pace)}
+        {section('7D pace', hv.pace7)}
         {section('Limit size', hv.limit)}
+        {section('Limit by time', hv.byTime)}
         {section('Projects', hv.projects)}
         {section('Hours', hv.hours)}
         {section('Re-reading', hv.reread)}

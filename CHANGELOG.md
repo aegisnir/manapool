@@ -2,6 +2,16 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## 0.6.0 (2026-11-14)
+
+More History charts, and hover everywhere.
+
+- **7D pace.**  This week against an even pace to 100% at reset and last week, drawn like 5H pace, with the projection from the band's runway.  Once 3 past weeks are logged it shows their middle half as a band instead of last week.
+- **7D readings are kept 120 days** in `samples.jsonl` (5H readings stay at 30), so 7D pace has past weeks to compare against.
+- **Limit by time.**  Work per 1% of 5H by weekday and 4-hour block, against the median of all kept ticks: shows whether the limit is bigger at night or on weekends.  Built from single ticks, model-adjusted (a pricier model does not read as a smaller limit), leaving out ticks over 90 minutes or crossing a block and outside use.  A cell with too few ticks to trust is drawn as an outline.
+- **Limit size is dated:** a date under the first window of each day, and each window's start and end times on hover.
+- **Hover crosshairs and tooltips on every chart,** with the raw numbers (work units, calls, readings, ranges).  CSS only, as the pane allows no scripts in a chart.
+
 ## 0.5.1 (2026-11-09)
 
 Correctness fixes from a review of 0.5.0.

@@ -850,6 +850,7 @@ def median(a):
 TICKS_FILE = os.path.join(data_dir, "ticks.json") if data_dir else ""
 TICK_V = 2  # 2: [start, end, % moved, {model: [output, write+input, read]}, calls]; 1 kept list totals only
 TICK_KEEP_DAYS = 180
+SEVEN_KEEP_DAYS = 120  # 7D readings in the tick log (5H readings: 30 days)
 HALF_LIFE_DAYS = 30
 PRIOR_SD = math.log(2)   # starting belief: a model's weight is within ~2x of list
 TICK_SD_FLOOR = 0.4      # a single tick is at least ~40% off (one reply of slop)
@@ -940,6 +941,60 @@ for k in MODELS:
 fit["MM"] = {k: round(v, 3) for k, v in MM.items()}
 if any(v != 1.0 for v in MM.values()):
     fit["source"] = "fit" if fit["source"] == "fit" else "fit-models"
+
+# ---------------------------------------------------------------------------
+# Limit by time (the History pane): how much work 1% of 5H holds, by weekday
+# and 4-hour block of local time.  Answers "is my limit bigger at night or on
+# weekends?"
+# - From the kept ticks (180 days), not windows: a 5H window can span a
+#   morning and an afternoon, a tick almost never does.
+# - Work is model-adjusted (the same weights the costs use), or a slot where
+#   you happened to use Fable would look like a smaller limit when it is only
+#   a pricier model.
+# - Left out: ticks longer than 90 minutes or crossing a block (they belong
+#   to two slots), and ticks with almost no local work behind them (outside
+#   use: claude.ai or the phone app moved the meter, not this computer).
+# - Pooled per slot (all work over all % moved) with a 90% range, so a slot
+#   with few ticks says so instead of looking certain.
+# ---------------------------------------------------------------------------
+BT_MAX_MIN = 90
+BT_BLOCK_H = 4
+
+
+def by_time(ticks_):
+    rows = []
+    for a, b, dp, groups, _n in ticks_:
+        if dp <= 0 or b - a > BT_MAX_MIN * 60:
+            continue
+        da, db = datetime.fromtimestamp(a), datetime.fromtimestamp(b)
+        if da.date() != db.date() or da.hour // BT_BLOCK_H != db.hour // BT_BLOCK_H:
+            continue
+        u = sum((g[0] * K[1] + g[1] * K[2] + g[2] * K[3]) * MM.get(k, 1.0) for k, g in groups.items())
+        rows.append((da.weekday(), da.hour // BT_BLOCK_H, dp, u))
+    if not rows:
+        return None
+    mid = median([u / dp for _w, _b, dp, u in rows])
+    rows = [r for r in rows if r[3] >= 0.25 * mid * r[2]]  # outside use, the ledger's rule
+    if not rows:
+        return None
+    every = sum(r[3] for r in rows) / sum(r[2] for r in rows)
+    cells = {}
+    for wd, blk, dp, u in rows:
+        cells.setdefault((wd, blk), []).append((dp, u))
+    grid = [[None] * (24 // BT_BLOCK_H) for _ in range(7)]
+    for (wd, blk), lst in cells.items():
+        n = len(lst)
+        sy = sum(dp for dp, u in lst)
+        rk = sum(u for dp, u in lst) / sy
+        # ratio estimator's spread, as in the model weights above; one tick is
+        # at least ~40% off, so a slot never claims more than its count allows
+        var = sum((u - rk * dp) ** 2 for dp, u in lst) / sy ** 2 * n / (n - 1) if n > 1 else rk ** 2
+        se = max(math.sqrt(var), rk * TICK_SD_FLOOR / math.sqrt(n))
+        grid[wd][blk] = {"per1": round(rk), "n": n, "pct": round(sy, 1), "err": round(1.645 * se)}
+    return {"per1": round(every), "ticks": len(rows), "block": BT_BLOCK_H, "grid": grid}
+
+
+out_by_time = by_time(all_ticks)
 
 # ---------------------------------------------------------------------------
 # Window totals.
@@ -1224,9 +1279,13 @@ if SAMPLES_FILE:
             add = [sample_of(kind, ra, pct) for kind, ra, pct in readings
                    if kind in SPAN and pct > top.get((kind, ra or ""), -1)]
             log += add
-            # Older than 30 days is no use (its transcripts are gone): rewrite
-            # without it once in a while; otherwise just append.
-            keep = [s for s in log if s.get("at", 0) >= now - 30 * 86400][-3000:]
+            # 5H readings older than 30 days are no use (their transcripts are
+            # gone): rewrite without them once in a while; otherwise just append.
+            # 7D readings are kept 120 days (about 90 a week) so the History
+            # pane's 7D pace can compare this week with the usual past weeks.
+            keep5 = [s for s in log if s.get("kind") != "seven_day" and s.get("at", 0) >= now - 30 * 86400][-3000:]
+            keep7 = [s for s in log if s.get("kind") == "seven_day" and s.get("at", 0) >= now - SEVEN_KEEP_DAYS * 86400][-2000:]
+            keep = sorted(keep5 + keep7, key=lambda s: s.get("at", 0))
             if not exists or len(keep) < len(log):
                 tmp = SAMPLES_FILE + ".tmp"
                 with open(tmp, "w") as f:
@@ -1246,5 +1305,6 @@ if SAMPLES_FILE:
 
 out["_unpriced"] = unpriced  # model id -> calls left out (not in the price table)
 out["_history"] = {"full": _hfull, "days": {k: _hdays[k] for k in sorted(_hdays)[-HIST_SEND:]}}
+out["_byTime"] = out_by_time
 out["_ticks"] = len(samples)
 print(json.dumps(out))
