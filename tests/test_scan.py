@@ -16,6 +16,7 @@ NOW = 1_800_000_000  # fixed clock
 fails = 0
 # The ledger rule the scanner builds rows under now (rows below it are rebuilt).
 RULE_NOW = int(re.search(r"^RULE = (\d+)", open(SCAN).read(), re.M).group(1))
+ORULE_NOW = int(re.search(r"^ORULE = (\d+)", open(SCAN).read(), re.M).group(1))
 
 
 def iso(t):
@@ -229,7 +230,7 @@ check("legacy whole-second reading keeps a same-second reply", d["_ledgerNew"][0
 r3 = asst(0, "m3", "claude-sonnet-5-5", i=1000); r3["timestamp"] = iso(rt + 600)
 row = {"kind": "five_hour", "resetsAt": resets, "start": st, "end": end, "pct": 20, "seen": rt + 0.5,
        "units": 2000, "per1": 100, "tokens": [2000, 0, 0, 0], "byModel": {"claude-sonnet-5-5": [2000, 0, 0, 0]},
-       "models": ["Sonnet"], "outside": 0, "weights": "list", "at": end, "readings": 2, "rule": RULE_NOW}
+       "models": ["Sonnet"], "outside": 0, "weights": "list", "at": end, "readings": 2, "rule": RULE_NOW, "orule": ORULE_NOW}
 late = samples + [{"at": rt + 700.5, "kind": "five_hour", "pct": 40, "resetsAt": resets}]
 d = run({"s.jsonl": [r1, r2, r3]}, [NOW - 3600], {"samples": late, "ledger": [row]})
 new = d["_ledgerNew"][0] if d["_ledgerNew"] else {}
@@ -582,10 +583,11 @@ check("tick log: a 60-day-old 7D reading stays, 5H and 200-day 7D go", kinds, [(
 shutil.rmtree(home)
 
 # 32. Elsewhere: the meter moves 0 -> 10% with 1,000 units here, then
-#     10 -> 15% with nothing here (a cloud session, say).  The window buys
-#     1000 / 15 units per 1%, so the second tick is 5 x 66.7 = 333 units
-#     elsewhere, on the day of the reading that showed it.  The first tick
-#     has its work and is not counted.
+#     10 -> 15% with nothing here (a cloud session, say).  The work here
+#     moved 10 points, so the window buys 1000 / 10 units per 1% (not / 15:
+#     the elsewhere points are in the top reading but not in the work), and
+#     the second tick is 5 x 100 = 500 units elsewhere, on the day of the
+#     reading that showed it.  The first tick has its work and is not counted.
 end = NOW + 3600
 st = end - 5 * 3600
 resets = iso(end)
@@ -595,7 +597,7 @@ smp = [{"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": resets},
        {"at": st + 7200, "kind": "five_hour", "pct": 15, "resetsAt": resets}]
 d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
 day = datetime.fromtimestamp(st + 7200).strftime("%Y-%m-%d")
-check("elsewhere: 5% with no local work, in list units", d["_history"]["days"].get(day, {}).get("e"), 333, tol=1)
+check("elsewhere: 5% with no local work, in list units", d["_history"]["days"].get(day, {}).get("e"), 500, tol=1)
 first = datetime.fromtimestamp(st + 3600).strftime("%Y-%m-%d")
 if first != day:
     check("elsewhere: the tick with local work adds nothing", d["_history"]["days"].get(first, {}).get("e"), None)
@@ -613,6 +615,254 @@ smp = [{"at": st2 + 60, "kind": "five_hour", "pct": 0, "resetsAt": r2},
 d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
 day = datetime.fromtimestamp(st + 3600).strftime("%Y-%m-%d")
 check("elsewhere: an all-elsewhere window uses the median per 1%", d["_history"]["days"].get(day, {}).get("e"), 400, tol=1)
+
+# 34. Use before the first reading here: a window's first reading is 30%
+#     with no work here (a cloud session ran while no session was open).
+#     The window starts at 0%, so 0 -> 30% is a tick like any other.  The
+#     window has no work of its own, so it borrows the ledger's usual
+#     100 units per 1%: 3,000 units elsewhere.
+end = NOW + 3600
+st = end - 5 * 3600
+led = [{"kind": "five_hour", "resetsAt": iso(NOW - 86400), "per1": 100, "pct": 20, "rule": RULE_NOW}]
+smp = [{"at": st + 3 * 3600, "kind": "five_hour", "pct": 30, "resetsAt": iso(end)}]
+d = run({"s.jsonl": [user(NOW - 2 * 86400)]}, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
+days = d["_history"]["days"]
+day = datetime.fromtimestamp(st + 3 * 3600).strftime("%Y-%m-%d")
+check("elsewhere: use before the first reading counts from the window start", days.get(day, {}).get("e"), 3000, tol=1)
+check("elsewhere: the reading marks the day measured", days.get(day, {}).get("s"), 1)
+
+# 35. A whole 5H window used elsewhere and reset before a session here read
+#     the meter: only the 7D meter shows it.  7D goes 10 -> 14% over 30
+#     hours with nothing here.  The work here moved 11 of the window's 15
+#     points (the 1-point step after the jump is rounding, so it stays with
+#     the work here): 1000 / 11 = 90.9 units per 1%, so 4 points = 364 units,
+#     on the day of the later reading, marked "since" the earlier one.  The
+#     1-point step adds nothing.
+end7 = NOW + 3 * 86400
+st7 = end7 - 7 * 86400
+r7 = iso(end7)
+t0, t1 = NOW - 40 * 3600, NOW - 10 * 3600
+files = {"s.jsonl": [user(st7 + 600), asst(st7 + 900, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": t0, "kind": "seven_day", "pct": 10, "resetsAt": r7},
+       {"at": t1, "kind": "seven_day", "pct": 14, "resetsAt": r7},
+       {"at": NOW - 60, "kind": "seven_day", "pct": 15, "resetsAt": r7}]
+d = run(files, [st7], {"samples": smp, "ledger": []})
+days = d["_history"]["days"]
+b1 = days.get(datetime.fromtimestamp(t1).strftime("%Y-%m-%d"), {})
+check("elsewhere: a 4-point 7D jump with nothing here counts", b1.get("e"), 364, tol=1)
+check("elsewhere: the jump is marked since its start", b1.get("es"), t0)
+check("elsewhere: a 1-point 7D step adds nothing", sum(v.get("e", 0) for v in days.values()), 364, tol=1)
+
+# 36. The same span seen by both meters is counted once.  A 5H window's only
+#     reading (30% at 10 units per 1% = 300 units) lands with the 7D reading
+#     that jumped 4 points (400 units at this window's 1000 / 10): the 5H tick already explains the
+#     jump, so the day holds 300, not 700.
+smp = [{"at": t0, "kind": "seven_day", "pct": 10, "resetsAt": r7},
+       {"at": t1, "kind": "seven_day", "pct": 14, "resetsAt": r7},
+       {"at": t1, "kind": "five_hour", "pct": 30, "resetsAt": iso(t1 + 3600)}]
+led = [{"kind": "five_hour", "resetsAt": iso(NOW - 3 * 86400), "per1": 10, "pct": 20, "rule": RULE_NOW}]
+d = run(files, [st7], {"samples": smp, "ledger": led})
+days = d["_history"]["days"]
+check("elsewhere: 5H and 7D seeing the same use count it once", sum(v.get("e", 0) for v in days.values()), 300, tol=1)
+
+# 37. Mostly elsewhere: a cloud session runs the window to 30% before any
+#     reading here, then 1,000 units here move it to 35%.  The work here
+#     moved 5 points, so 200 units per 1%, and the 30 points are 6,000 units.
+#     Dividing by the top reading (1000 / 35) would have shown 857.
+end = NOW + 3600
+st = end - 5 * 3600
+files = {"s.jsonl": [user(st + 3 * 3600 + 60), asst(st + 3 * 3600 + 120, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 3 * 3600, "kind": "five_hour", "pct": 30, "resetsAt": iso(end)},
+       {"at": st + 4 * 3600, "kind": "five_hour", "pct": 35, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+tot = sum(v.get("e", 0) for v in d["_history"]["days"].values())
+check("elsewhere: a mostly-elsewhere window is weighed by the work here", tot, 6000, tol=1)
+
+# 38. Limit check: work per 1% counts only the points the work here moved.
+#     1,000 units take this window 0 -> 10%, then a cloud session takes it
+#     to 15%.  1000 / 10 = 100 per 1% (dividing by 15 would read as a limit a
+#     third smaller).  A past row of 40% with 20% elsewhere and 2,000 units
+#     is likewise 2000 / 20 = 100, not 50.
+end = NOW + 3600
+st = end - 5 * 3600
+files = {"s.jsonl": [user(st + 300), asst(st + 600, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 3600, "kind": "five_hour", "pct": 10, "resetsAt": iso(end)},
+       {"at": st + 7200, "kind": "five_hour", "pct": 15, "resetsAt": iso(end)}]
+led = [{"kind": "five_hour", "resetsAt": iso(NOW - 86400), "start": NOW - 86400 - 18000, "end": NOW - 86400,
+        "pct": 40, "outside": 20, "units": 2000, "per1": 50, "rule": RULE_NOW}]
+d = run(files, [st, f"--since5h={st}"], {"samples": smp, "ledger": led})
+check("limit check: elsewhere points left out of work per 1%", d["_check"]["per1"], 100)
+check("limit check: points moved here", d["_check"]["herePct"], 10)
+check("limit check: a past row is measured over its points here", d["_check"]["lo"], 100)
+
+# 39. The first, partly covered day of a scan is never rebuilt, but it gets
+#     its elsewhere fields once: readings counted, and 10% elsewhere at the
+#     usual 100 per 1%.  A later scan that sees less of it does not
+#     overwrite them.
+noon = int(datetime(2027, 1, 13, 12).timestamp())
+now2 = noon + 2 * 86400
+home = home_with({"s.jsonl": [user(noon - 86400)]})
+dd = os.path.join(home, "data")
+r39 = iso(noon + 4 * 3600)
+smp = [{"at": noon + 3600, "kind": "five_hour", "pct": 0, "resetsAt": r39},
+       {"at": noon + 7200, "kind": "five_hour", "pct": 10, "resetsAt": r39}]
+led = [{"kind": "five_hour", "resetsAt": iso(noon - 86400), "pct": 20, "outside": 0, "per1": 100, "rule": RULE_NOW}]
+d = run_in(home, [noon, f"--now={now2}", f"--data-dir={dd}"], {"samples": smp, "ledger": led})
+b = d["_history"]["days"].get("2027-01-13", {})
+check("first day: readings counted", b.get("s"), 2)
+check("first day: elsewhere filled in", b.get("e"), 1000, tol=1)
+hp = os.path.join(dd, "history.json")
+h = json.load(open(hp))
+h["days"]["2027-01-13"]["e"] = 7
+with open(hp, "w") as f:
+    json.dump(h, f)
+d = run_in(home, [noon, f"--now={now2}", f"--data-dir={dd}"], {"samples": smp, "ledger": led})
+check("first day: set once, never overwritten", d["_history"]["days"].get("2027-01-13", {}).get("e"), 7)
+shutil.rmtree(home)
+
+# 40. Rounding: 350 units take the meter 0 -> 4% (really about 4.9), and the
+#     next reading ticks to 5% with nothing behind it.  The tick before
+#     explains it, so it is not elsewhere.  A 1-point tick after a quiet
+#     elsewhere tick still counts.
+end = NOW + 3600
+st = end - 5 * 3600
+files = {"s.jsonl": [user(st + 300), asst(st + 600, "m1", "claude-sonnet-5-5", i=350)]}
+smp = [{"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 3600, "kind": "five_hour", "pct": 4, "resetsAt": iso(end)},
+       {"at": st + 3700, "kind": "five_hour", "pct": 5, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+check("rounding: a 1-point tick the tick before explains is not elsewhere",
+      sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
+smp += [{"at": st + 7200, "kind": "five_hour", "pct": 9, "resetsAt": iso(end)},
+        {"at": st + 7300, "kind": "five_hour", "pct": 10, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+check("rounding: a 1-point tick after a quiet elsewhere tick counts", d["_history"]["days"] and
+      round(sum(v.get("e", 0) for v in d["_history"]["days"].values()) / 70), 5)
+
+# 41. A row whose elsewhere count was made under an older rule is rebuilt
+#     while its readings are on disk, with the same work per 1%.
+end = NOW - 600
+st = end - 5 * 3600
+files = {"s.jsonl": [user(st + 60), asst(st + 120, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 30, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 3600, "kind": "five_hour", "pct": 20, "resetsAt": iso(end)}]
+old = [{"kind": "five_hour", "resetsAt": iso(end), "start": st, "end": end, "pct": 20, "seen": st + 3600, "units": 1000,
+        "per1": 50, "tokens": [1000, 0, 0, 0], "models": ["Sonnet"], "outside": 4, "weights": "list", "at": end,
+        "readings": 2, "rule": RULE_NOW}]
+d = run(files, [NOW - 3600], {"samples": smp, "ledger": old})
+row = (d["_ledgerNew"] or [{}])[0]
+check("old elsewhere rule: row rebuilt", (row.get("outside"), row.get("orule"), row.get("per1")), (0, ORULE_NOW, 50))
+
+# 42. Meter lag: 90 units of work here (0.9 of a point at 100 per 1%), then a
+#     reading that still shows 0%, then 1% twenty seconds later with 5 more
+#     units.  The meter was catching up on the work, not counting use
+#     elsewhere.  (Found by review: the 0% tick used to drop its work.)
+end = NOW + 3600
+st = end - 5 * 3600
+led = [{"kind": "five_hour", "resetsAt": iso(NOW - 86400), "per1": 100, "pct": 20, "outside": 0, "rule": RULE_NOW}]
+files = {"s.jsonl": [user(st + 500), asst(st + 600, "m1", "claude-sonnet-5-5", i=90),
+                     asst(st + 3610, "m2", "claude-sonnet-5-5", i=5)]}
+smp = [{"at": st + 3600, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 3620, "kind": "five_hour", "pct": 1, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
+check("lag: a 0% reading after work is not followed by false elsewhere",
+      sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
+
+# 43. Heavy work, meter catching up in jumps: 600 units in 3 minutes (6
+#     points at 100 per 1%) with readings 0 -> 1 -> 6 a minute apart; the
+#     jump of 5 has only 100 units in its own tick but the last few minutes'
+#     work is still on its way.  Not elsewhere.
+files = {"s.jsonl": [user(st + 500)] + [asst(st + 600 + 30 * i, f"h{i}", "claude-sonnet-5-5", i=100) for i in range(6)]}
+smp = [{"at": st + 560, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 700, "kind": "five_hour", "pct": 1, "resetsAt": iso(end)},
+       {"at": st + 760, "kind": "five_hour", "pct": 6, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
+check("lag: a catch-up jump during heavy work is not elsewhere",
+      sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
+
+# 44. But old work does not hide a jump: 1,000 units, the meter shows 10%
+#     23 minutes later (the computer quiet since), then +5% an hour on with
+#     nothing here.  Still elsewhere.  (Work in the 15 minutes before a tick
+#     does count towards it: then lag and use elsewhere at the same time
+#     can't be told apart, and it is not called elsewhere.)
+files = {"s.jsonl": [user(st + 500), asst(st + 600, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 2000, "kind": "five_hour", "pct": 10, "resetsAt": iso(end)},
+       {"at": st + 5600, "kind": "five_hour", "pct": 15, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
+check("lag: old work does not hide later use elsewhere",
+      sum(v.get("e", 0) for v in d["_history"]["days"].values()), 500, tol=1)
+
+# 45. A new install (no ledger) with a window used only elsewhere: the ledger
+#     row and the limit check count it too (they used to say 0, and the row
+#     was then never rebuilt).  The other window, 1,000 units over 10%, gives
+#     the usual 100 per 1%.
+end2 = NOW - 6 * 3600
+st2 = end2 - 5 * 3600
+end3 = NOW - 600
+st3 = end3 - 5 * 3600
+files = {"s.jsonl": [user(st2 + 300), asst(st2 + 600, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st2 + 60, "kind": "five_hour", "pct": 0, "resetsAt": iso(end2)},
+       {"at": st2 + 3600, "kind": "five_hour", "pct": 10, "resetsAt": iso(end2)},
+       {"at": st3 + 3600, "kind": "five_hour", "pct": 30, "resetsAt": iso(end3)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+rows = {r["resetsAt"]: r for r in d["_ledgerNew"]}
+check("no ledger: an all-elsewhere window's row counts it", rows.get(iso(end3), {}).get("outside"), 30)
+
+# 46. The weighting settles: elsewhere plus work here never adds up to more
+#     than the meter.  Work 1,072 units early, cloud jumps later.
+files = {"s.jsonl": [user(st + 300), asst(st + 600, "m1", "claude-sonnet-5-5", i=1072)]}
+smp = [{"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 900, "kind": "five_hour", "pct": 10, "resetsAt": iso(end)},
+       {"at": st + 4500, "kind": "five_hour", "pct": 14, "resetsAt": iso(end)},
+       {"at": st + 8100, "kind": "five_hour", "pct": 17, "resetsAt": iso(end)},
+       {"at": st + 11700, "kind": "five_hour", "pct": 24, "resetsAt": iso(end)}]
+d = run(files, [st, f"--since5h={st}"], {"samples": smp, "ledger": []})
+c_ = d["_check"]
+check("settled: elsewhere + here points = the meter", c_["outside"] + c_["herePct"], 24)
+check("settled: work per 1% is the work over the points here", c_["per1"], round(1072 / c_["herePct"]), tol=1)
+
+# 47. 7D: one point of work still on its way does not hide a 4-point jump.
+#     900 units moved 7D to 9% (and 0.9 of a point is left unshown), then the
+#     meter jumps to 13% with nothing here: 3 points at least are elsewhere.
+end7 = NOW + 3 * 86400
+st7 = end7 - 7 * 86400
+files = {"s.jsonl": [user(st7 + 600), asst(st7 + 900, "m1", "claude-sonnet-5-5", i=990)]}
+smp = [{"at": st7 + 1200, "kind": "seven_day", "pct": 9, "resetsAt": iso(end7)},
+       {"at": NOW - 10 * 3600, "kind": "seven_day", "pct": 13, "resetsAt": iso(end7)}]
+d = run(files, [st7], {"samples": smp, "ledger": []})
+e7 = sum(v.get("e", 0) for v in d["_history"]["days"].values())
+check("7D: a jump is not hidden by a point of work still on its way", e7 >= 300, True)
+
+# 48. The carry's "usual" is for windows on the same model.  Opus windows buy
+#     far more list units per 1% than Fable ones (list prices weigh models
+#     unlike the meter).  A Fable catch-up jump, as in 43, must not be called
+#     elsewhere just because the all-model usual is Opus-sized.
+end = NOW + 3600
+st = end - 5 * 3600
+led = ([{"kind": "five_hour", "resetsAt": iso(NOW - (10 + i) * 86400), "per1": 10 ** 7, "pct": 20, "outside": 0,
+         "models": ["Opus"], "rule": RULE_NOW} for i in range(4)] +
+       [{"kind": "five_hour", "resetsAt": iso(NOW - (20 + i) * 86400), "per1": 1, "pct": 20, "outside": 0,
+         "models": ["Fable"], "rule": RULE_NOW} for i in range(3)])
+files = {"s.jsonl": [user(st + 500)] + [asst(st + 600 + 30 * i, f"f{i}", "claude-fable-5-2", i=100) for i in range(5)]}
+smp = [{"at": st + 560, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 700, "kind": "five_hour", "pct": 1, "resetsAt": iso(end)},
+       {"at": st + 725, "kind": "five_hour", "pct": 6, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
+check("carry: a Fable window is judged against Fable windows",
+      sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
+
+# 49. Busy computer: a 1-point tick with almost no work of its own, but with
+#     work here a few minutes before it, is not elsewhere (lag, or use
+#     elsewhere alongside work here, which can't be told apart).
+files = {"s.jsonl": [user(st + 500), asst(st + 600, "m1", "claude-sonnet-5-5", i=300),
+                     asst(st + 900, "m2", "claude-sonnet-5-5", i=300)]}
+smp = [{"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": iso(end)},
+       {"at": st + 950, "kind": "five_hour", "pct": 6, "resetsAt": iso(end)},
+       {"at": st + 1000, "kind": "five_hour", "pct": 7, "resetsAt": iso(end)}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
+check("busy: a tick right after work here is not elsewhere",
+      sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
 
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)

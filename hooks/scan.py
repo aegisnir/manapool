@@ -349,6 +349,12 @@ def win_bounds(kind, resets_at):
 # 3: exact reading times; 2 had the whole-second cutoff
 # The History pane applies the same filter (register.tsx LEDGER_RULE: keep equal).
 RULE = 4
+# The rule a row's "outside" (elsewhere) count was made under.  A row from an
+# older one is rebuilt while its readings and transcripts are on disk, and
+# kept as it is otherwise (unlike RULE, an old count does not drop the row).
+# 2: 0.7.1: window start counts as a reading, 1-point rounding ticks left
+#    out, weighed by the work here
+ORULE = 2
 # A row is also redone when the log holds a higher reading for its window
 # than the row used (a session saved its reading after another session had
 # already closed the window).
@@ -357,7 +363,8 @@ for s in samples:
     k = (s.get("kind"), s.get("resetsAt"))
     top_pct[k] = max(top_pct.get(k, -1), s.get("pct", -1))
 done = {(r.get("kind"), r.get("resetsAt")) for r in ledger
-        if (r.get("rule") or 0) >= RULE and (r.get("pct") or 0) >= top_pct.get((r.get("kind"), r.get("resetsAt")), -1)}
+        if (r.get("rule") or 0) >= RULE and (r.get("orule") or 1) >= ORULE
+        and (r.get("pct") or 0) >= top_pct.get((r.get("kind"), r.get("resetsAt")), -1)}
 closing = {}
 for s in samples:
     k = (s.get("kind"), s.get("resetsAt"))
@@ -536,12 +543,21 @@ def roll(calls_):
     return days
 
 
-def hist_merge(fresh, replace_from=None, fill_only=False):
+def hist_merge(fresh, replace_from=None, fill_only=False, early=None):
     """Fold fresh day buckets into history.json under the shared lock.
     replace_from: days on or after this key are replaced (the normal scan saw
     all of them); fill_only: only days the file lacks are added (backfill),
-    and the file is marked complete.  Returns the file's days."""
+    and the file is marked complete.  early: elsewhere fields (e, s, es) for
+    days before replace_from, set once on a day that has none yet (the first,
+    partly covered day of the scan; never overwritten, since a later scan
+    sees less of it).  Returns the file's days."""
+    def add_early(days):
+        for k, v in (early or {}).items():
+            b = days.setdefault(k, {"m": {}, "p": {}, "h": [0] * 24, "r": 0, "n": 0})
+            if "s" not in b:
+                b.update(v)
     if not HIST_FILE:
+        add_early(fresh)
         return fresh, False
     os.makedirs(data_dir, exist_ok=True)
     with open(LOCK_FILE, "a+") as lk:
@@ -564,6 +580,7 @@ def hist_merge(fresh, replace_from=None, fill_only=False):
                     for k in [k for k in days if k >= replace_from]:
                         del days[k]
                 days.update(fresh)
+                add_early(days)
             keep = sorted(days)[-HIST_KEEP:]
             days = {k: days[k] for k in keep}
             tmp = f"{HIST_FILE}.{os.getpid()}.tmp"
@@ -772,20 +789,222 @@ def calls_between(a, b):
     return CALLS[bisect_right(CALL_TS, a):bisect_right(CALL_TS, b)]
 
 
+# ---------------------------------------------------------------------------
+# Elsewhere: meter movement with no work here behind it (cloud sessions,
+# claude.ai chat, the phone app, other computers: the meter moved, nothing
+# here did).  Found here, before the weight fits, so the fits can leave those
+# ticks out (they would credit the cloud's points to the models used here).
+# Only lumpy ticks count.  Elsewhere use that runs alongside work here moves
+# the meter the same way a smaller limit would, so it stays in the limit
+# check instead.  The ledger and history.json keep the field name "outside".
+# Everything here is in list units (plain list prices): it never depends on
+# the fits, so finding it first changes nothing else.
+# ---------------------------------------------------------------------------
+def median(a):
+    a = sorted(a)
+    if not a:
+        return 0.0
+    n = len(a)
+    return a[n // 2] if n % 2 else (a[n // 2 - 1] + a[n // 2]) / 2
+
+
+# Running total of list units over CALLS: the list units of any time range is
+# two binary searches and a subtraction, not a walk over the calls.
+_LU = [0.0]
+for c in CALLS:
+    _LU.append(_LU[-1] + list_units(c))
+
+
+def lu_between(a, b):
+    """List units of the calls with a < time <= b (calls_between's range)."""
+    return _LU[bisect_right(CALL_TS, b)] - _LU[bisect_right(CALL_TS, a)]
+
+
+def lu_from(a, b):
+    """List units of the calls with a <= time <= b (totals' range)."""
+    return _LU[bisect_right(CALL_TS, b)] - _LU[bisect_left(CALL_TS, a)]
+
+
+# Every window's readings, oldest first, grouped once.
+WIN = {}
+for s in samples:
+    if s.get("kind") in SPAN and s.get("resetsAt"):
+        WIN.setdefault((s["kind"], s["resetsAt"]), []).append(s)
+for _l in WIN.values():
+    _l.sort(key=lambda s: s["at"])
+
+
+# Work per 1% counts only the points the work here moved: the points moved
+# elsewhere are in the meter but not in the work, so leaving them in would
+# make a window used partly in the cloud look like a smaller limit (one gap
+# shown twice, as elsewhere and as "buys less").  Rows keep the plain figure
+# (per1, pct, outside), so this is worked out where it is used, old rows too
+# (register.tsx herePts: keep equal).
+def here_pts(r):
+    return (r.get("pct") or 0) - (r.get("outside") or 0)
+
+
+def per1_or_usual(kind, per1):
+    """per1, or when there is none the ledger's usual (median) list units per
+    1% of work here for windows of this kind."""
+    if per1 > 0:
+        return per1
+    return median([r["per1"] * r["pct"] / here_pts(r) for r in ledger
+                   if r.get("kind") == kind and r.get("per1") and here_pts(r) >= 3])
+
+
+# A tick is only elsewhere when this computer was quiet around it.  The meter
+# lags the work and shows whole points: a reading can show 0% after work has
+# started, and during heavy work the meter catches up in jumps of several
+# points within a minute, often with little work in that tick itself.  And
+# use elsewhere at the same time as work here cannot be told apart from that
+# (or from a smaller limit) anyway.  So the work of the QUIET seconds before a
+# tick counts towards it, and so does under a point of rounding carried from
+# earlier (the meter shows whole points: 4.9 points of work reads 4% until a
+# little more work makes it 5%, however long that takes).  Work older than
+# that has shown on the meter already, so a long stretch of work here cannot
+# hide use elsewhere after it.  On real data every tick flagged without this
+# was under 5 minutes long with points of work here just before it.
+CARRY_ROUND = 0.95  # points
+QUIET = 900         # seconds
+
+
+def elsewhere_ticks(kind, resets_at, per1, fam=None):
+    """[(tick start, reading time, % moved)] for each tick whose move has
+    under a quarter of the work here it would take, counting work carried
+    from earlier ticks (per1: list units per 1% in this window).
+    A window starts at 0%, so its start counts as a reading: use before the
+    first reading here (a cloud session while no session was open here, say)
+    is tested like any other tick.  resetsAt sits on a 10-minute grid, so the
+    start is at most 10 minutes early, and work in those minutes counts as
+    work here.  On 7D every quiet night ticks 1 point of rounding, so 7D
+    needs 2."""
+    lst = WIN.get((kind, resets_at)) or []
+    if per1 <= 0 or not lst:
+        return []
+    st, _ = win_bounds(kind, resets_at)
+    if st and lst[0]["at"] > st:
+        lst = [{"at": st, "pct": 0, "ts": 1}] + lst
+    # The carry is worked out at the usual figure when it is higher: a window
+    # used partly elsewhere has a figure too low until that use is found, and
+    # at a too-low figure the work here would seem to cover more points than
+    # it did, which then hides the use elsewhere.  "Usual" is for windows run
+    # mostly on the same model (fam): list prices weigh models unlike the
+    # meter does, so a Fable window buys about half the list units per 1% of
+    # an Opus one, and an all-model usual would switch the carry off there.
+    pc = max(per1, usual(kind, fam))
+    odd, carry = [], 0.0
+    for a, b in zip(lst, lst[1:]):
+        # before `oldest` the scan has not read the calls, so no work would
+        # show and every tick would look like elsewhere
+        if a["at"] < oldest:
+            carry = 0.0
+            continue
+        dp = b["pct"] - a["pct"]
+        own = lu_between(cut(a), cut(b))
+        # work of the quiet seconds before the tick (not before the window:
+        # that work belongs to the last window's meter)
+        near = lu_between(max(st, cut(a) - QUIET), cut(a)) if st else 0.0
+        if dp > 0 and carry + near + own < 0.25 * per1 * dp and (kind == "five_hour" or dp >= 2):
+            odd.append((a["at"], b["at"], dp))
+            left = carry + own  # these points were not this work's
+        else:
+            left = max(0.0, carry + own - pc * max(dp, 0))
+        carry = min(left, CARRY_ROUND * pc)
+    return odd
+
+
+_USUAL = {}
+
+
+def usual(kind, fam=None):
+    """The usual list units per 1% of work here: the ledger's median over
+    windows run mostly on model family `fam` (3 or more of them), else over
+    all windows of this kind, or with no ledger yet (a new install) the
+    median of the windows in the tick log."""
+    if (kind, fam) not in _USUAL:
+        same = [r["per1"] * r["pct"] / here_pts(r) for r in ledger
+                if fam and r.get("kind") == kind and r.get("per1") and here_pts(r) >= 3
+                and (r.get("models") or [""])[0].lower() == fam]
+        if len(same) >= 3:
+            _USUAL[(kind, fam)] = median(same)
+            return _USUAL[(kind, fam)]
+        u = per1_or_usual(kind, 0)
+        if not u:
+            own = []
+            for (k, ra), lst in WIN.items():
+                st, en = win_bounds(k, ra)
+                top = max(lst, key=lambda x: x["pct"])
+                if k == kind and st >= oldest and top["pct"] > 0:
+                    own.append(lu_from(st, min(en, cut(top))) / top["pct"])
+            u = median([p for p in own if p > 0])
+        _USUAL[(kind, fam)] = u
+    return _USUAL[(kind, fam)]
+
+
+_FIT = {}
+
+
+def else_fit(kind, resets_at):
+    """(list units per 1%, elsewhere ticks) for one window, worked out once.
+    The figure is the work here over the points the work here moved, not over
+    the window's top reading: elsewhere points are in the top reading but not
+    in the work, so dividing by the top would shrink the figure by the share
+    used elsewhere (a window run to 30% in the cloud and 35% in all would
+    weigh at 0.14x).  The elsewhere points depend on the figure and the
+    figure on them, so this repeats until neither changes (a higher figure
+    can only find more elsewhere, so it settles within a few rounds).  With
+    under 3 points left to the work here the window has no figure of its
+    own and uses the usual one."""
+    key = (kind, resets_at)
+    if key not in _FIT:
+        lst = WIN.get(key) or []
+        if not lst:
+            _FIT[key] = (0, [])
+            return _FIT[key]
+        st, en = win_bounds(kind, resets_at)
+        top = max(lst, key=lambda x: x["pct"])
+        here = lu_from(st, min(en, cut(top)))
+        # the model family with the most work here in this window
+        by_fam = {}
+        for c in CALLS[bisect_left(CALL_TS, st):bisect_right(CALL_TS, min(en, cut(top)))]:
+            by_fam[c["k"]] = by_fam.get(c["k"], 0.0) + list_units(c)
+        fam = max(by_fam, key=by_fam.get) if by_fam else None
+        fallback = usual(kind, fam)
+        p1 = here / top["pct"] if top["pct"] > 0 and here > 0 else fallback
+        tk = elsewhere_ticks(kind, resets_at, p1, fam)
+        for _ in range(12):
+            left = top["pct"] - sum(t[2] for t in tk)
+            new = here / left if left >= 3 and here > 0 else fallback
+            if abs(new - p1) <= 1e-6 * max(1.0, p1):
+                break
+            p1 = new
+            tk = elsewhere_ticks(kind, resets_at, p1, fam)
+        _FIT[key] = (p1, tk)
+    return _FIT[key]
+
+
+def outside(kind, resets_at):
+    return sum(t[2] for t in else_fit(kind, resets_at)[1])
+
+
+# 5H ticks that are elsewhere, by (window, reading time), for the fits below.
+ELSE_5H = {(ra, t[1]) for (k, ra) in WIN if k == "five_hour" and win_bounds(k, ra)[1] > oldest
+           for t in else_fit(k, ra)[1]}
+
+
 # Each tick: (dp, [list-weighted output, write(+input), read],
 #             {model: the same three numbers for that model's calls}, start, end, calls)
 # The three groups are the ones the token-type fit below scales (K), so the
 # model fit can apply K first and measure only what K leaves unexplained.
 ticks = []
-by_win = {}
-for s in samples:
-    if s.get("kind") == "five_hour" and s.get("resetsAt"):
-        by_win.setdefault(s["resetsAt"], []).append(s)
-for ra, lst in by_win.items():
-    lst.sort(key=lambda s: s["at"])
+for (kind_, ra), lst in WIN.items():
+    if kind_ != "five_hour":
+        continue
     for a, b in zip(lst, lst[1:]):
         dp = b["pct"] - a["pct"]
-        if dp <= 0 or a["at"] < oldest:
+        # an elsewhere tick's points are not this work's: left out of the fits
+        if dp <= 0 or a["at"] < oldest or (ra, b["at"]) in ELSE_5H:
             continue
         x = [0.0, 0.0, 0.0]
         per_model = {}
@@ -824,14 +1043,6 @@ if len(usable) >= 15:
             K[3] = x[2] / x[0]
             fit["source"] = "fit"
             fit["K"] = [round(v, 4) for v in K]
-def median(a):
-    a = sorted(a)
-    if not a:
-        return 0.0
-    n = len(a)
-    return a[n // 2] if n % 2 else (a[n // 2 - 1] + a[n // 2]) / 2
-
-
 # ---------------------------------------------------------------------------
 # Model multipliers: how much each model moves the 5H meter per list-price
 # unit, relative to your average tick (1.0x = what its list price says).
@@ -907,6 +1118,10 @@ def tick_merge(fresh):
 
 
 all_ticks = tick_merge(usable)
+# Ticks kept from earlier scans may be ones now found elsewhere: leave them
+# out too (the tick log keeps them; this is decided again every scan).
+_else_ends = {t for _, t in ELSE_5H}
+all_ticks = [t for t in all_ticks if t[1] not in _else_ends]
 pool = {k: [] for k in MODELS}  # per model: (weight, % moved, K-weighted units)
 ref_y = ref_x = 0.0
 for a, b, dp, groups, _n in all_ticks:
@@ -1174,36 +1389,8 @@ out["_handoff"] = {"extra": HANDOFF_EXTRA, "noteOut": HANDOFF_NOTE_OUT}
 # reading seen, and the units are counted only up to that same moment: work
 # done after the last reading moved the meter unseen, so counting it would
 # make a percent look bigger than it was (and a later window look shrunk).
-# A tick with almost no local work behind it is "elsewhere" (cloud sessions,
-# claude.ai chat, the phone app, other computers: the meter moved, nothing
-# here did).  Only such lumpy ticks count.  Elsewhere work that runs
-# alongside local work can't be told apart from a smaller limit (both make
-# 1% buy less local work), so it stays in the limit check instead.
-# The ledger and history.json keep the field name "outside".
+# Each row also counts its elsewhere points ("outside", see else_fit).
 # ---------------------------------------------------------------------------
-def elsewhere_ticks(kind, resets_at, per1):
-    """[(reading time, % moved)] for each tick with under a quarter of the
-    local work its move would take (per1: list units per 1% in this window)."""
-    lst = sorted([s for s in samples if s.get("kind") == kind and s.get("resetsAt") == resets_at], key=lambda s: s["at"])
-    if per1 <= 0:
-        return []
-    odd = []
-    for a, b in zip(lst, lst[1:]):
-        dp = b["pct"] - a["pct"]
-        # before `oldest` the scan has not read the calls, so no work would
-        # show and every tick would look like elsewhere
-        if dp <= 0 or a["at"] < oldest:
-            continue
-        u = sum(list_units(c) for c in calls_between(cut(a), cut(b)))
-        if u < 0.25 * per1 * dp:
-            odd.append((b["at"], dp))
-    return odd
-
-
-def outside(kind, resets_at, per1):
-    return sum(dp for _, dp in elsewhere_ticks(kind, resets_at, per1))
-
-
 new_rows = []
 for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
     lst = [s for s in samples if s.get("kind") == kind and s.get("resetsAt") == ra]
@@ -1223,8 +1410,8 @@ for (kind, ra), (st, en) in sorted(closing.items(), key=lambda kv: kv[1][0]):
         "kind": kind, "resetsAt": ra, "start": st, "end": en, "pct": top["pct"], "seen": top["at"],
         "units": tot["listUnits"], "per1": round(per1) if per1 else None,
         "tokens": [tot["input"], tot["output"], tot["cache_write"], tot["cache_read"]], "byModel": by_model,
-        "models": sorted(set(models), key=models.index), "outside": outside(kind, ra, per1),
-        "weights": "list", "at": now, "readings": len(lst), "rule": RULE,
+        "models": sorted(set(models), key=models.index), "outside": outside(kind, ra),
+        "weights": "list", "at": now, "readings": len(lst), "rule": RULE, "orule": ORULE,
     })
 out["_ledgerNew"] = new_rows
 
@@ -1252,8 +1439,8 @@ def row_units(r):
 
 rebuilt = {(r["kind"], r["resetsAt"]) for r in new_rows}
 kept = [r for r in ledger if (r.get("rule") or 0) >= RULE and (r.get("kind"), r.get("resetsAt")) not in rebuilt]
-full = [r for r in kept + new_rows if r.get("kind") == "five_hour" and (r.get("pct") or 0) >= 20]
-vals = sorted(row_units(r) / r["pct"] for r in full if row_units(r) > 0)
+full = [r for r in kept + new_rows if r.get("kind") == "five_hour" and here_pts(r) >= 20]
+vals = sorted(row_units(r) / here_pts(r) for r in full if row_units(r) > 0)
 chk = None
 if starts and since5h:
     cur = out.get(str(int(since5h)))
@@ -1263,42 +1450,100 @@ if starts and since5h:
     # anything after it has not shown on the meter yet.
     cur_at = max([cut(s) for s in cur_s if s["pct"] == cur_pct] or [now])
     cur = totals(since5h, cur_at) if cur_s else cur
-    per1_now = cur["units"] / cur_pct if cur and cur_pct > 0 else None
+    rs = cur_s[0]["resetsAt"] if cur_s else None
+    odd_now = outside("five_hour", rs) if rs else 0
+    per1_now = cur["units"] / (cur_pct - odd_now) if cur and cur_pct - odd_now > 0 else None
     if vals:
         q = lambda p: vals[min(len(vals) - 1, max(0, int(round(p * (len(vals) - 1)))))]
         lo_, hi_ = (q(0.25), q(0.75)) if len(vals) >= 4 else (vals[0], vals[-1])
     else:
         lo_ = hi_ = None
-    rs = cur_s[0]["resetsAt"] if cur_s else None
-    chk = {"per1": round(per1_now) if per1_now else None, "pct": cur_pct, "lo": round(lo_) if lo_ else None, "hi": round(hi_) if hi_ else None, "n": len(vals), "weights": fit["source"],
-           "outside": outside("five_hour", rs, (cur["listUnits"] / cur_pct) if cur and cur_pct > 0 else 0) if rs else 0}
+    chk = {"per1": round(per1_now) if per1_now else None, "pct": cur_pct, "herePct": cur_pct - odd_now, "lo": round(lo_) if lo_ else None, "hi": round(hi_) if hi_ else None, "n": len(vals), "weights": fit["source"],
+           "outside": odd_now}
 out["_check"] = chk
 
-# Elsewhere per day (history.json "e"): each elsewhere tick's % moved, times
-# its window's list units per 1%, put on the day of the reading that showed
-# it.  Same rule and per-1% figure as the ledger, so the band's "elsewhere"
-# and the History pane agree.  A window with no local work at all has no
-# per-1% figure of its own; it borrows the median of the others.
-_per1 = {}
+# Elsewhere per day, in history.json:
+#   e: elsewhere list units: each elsewhere tick's % moved times its
+#      window's list units per 1%, on the day of the reading that showed it.
+#      Same rule and per-1% figure as the ledger, so the band's "elsewhere"
+#      and the History pane agree.
+#   s: meter readings taken that day.  None means elsewhere was not
+#      measured that day: it can only show between two readings.
+#   es: when a tick counted that day started on an earlier day (use while no
+#      session was open here), the earliest such start, so the pane can say
+#      "since Sat".
+# 5H ticks first.  Then 7D ticks, for whole 5H windows used elsewhere that
+# reset before a session here read the meter: a 7D jump of 2+ points that the
+# work here (allowing one point of it still on its way) does not explain,
+# after taking off what 5H ticks in the same span already counted, so nothing
+# is counted twice.  The 7D meter moves in whole points and every quiet night
+# moves it 1 (rounding of the work before it), so the jump must leave 2.
+# Days before _cover (the first, partly covered day) are not rebuilt; their
+# elsewhere fields go to `_early`, set once (hist_merge).  Only readings and
+# ticks from `oldest` on count, where the scan has every call.
+_early = {}
+
+
+def _day(t):
+    if t >= _cover:
+        return _fresh.setdefault(day_of(t)[0], {"m": {}, "p": {}, "h": [0] * 24, "r": 0, "n": 0})
+    return _early.setdefault(day_of(t)[0], {})
+
+
+def _count(a_at, b_at, units):
+    b = _day(b_at)
+    b["e"] = b.get("e", 0) + round(units)
+    if day_of(a_at)[0] != day_of(b_at)[0]:
+        b["es"] = min(b.get("es") or a_at, a_at)
+
+
 for s in samples:
-    ra = s.get("resetsAt")
-    if s.get("kind") != "five_hour" or not ra or ra in _per1:
+    if s.get("kind") == "five_hour" and s.get("at", 0) >= oldest:
+        b = _day(s["at"])
+        b["s"] = b.get("s", 0) + 1
+
+_caught = []  # (tick start, reading time, list units) of each 5H elsewhere tick
+for (kind_, ra) in WIN:
+    if kind_ != "five_hour" or win_bounds(kind_, ra)[1] <= oldest:
         continue
-    st, en = win_bounds("five_hour", ra)
-    if en <= _cover:
+    p1, tk = else_fit(kind_, ra)
+    for a_at, b_at, dp in tk:
+        _caught.append((a_at, b_at, dp * p1))
+        _count(a_at, b_at, dp * p1)
+
+
+def _seen(a, b):
+    """5H elsewhere units inside the 7D span (a, b].  A 5H tick that runs past
+    either end counts by the share of it inside (when in it the use happened
+    is unknown), so each is counted once across the 7D spans."""
+    tot = 0.0
+    for t0, t1, u in _caught:
+        lo, hi = max(t0, a), min(t1, b)
+        if hi > lo:
+            tot += u * (hi - lo) / (t1 - t0) if t1 > t0 else u
+    return tot
+
+
+for (kind_, ra), lst in WIN.items():
+    if kind_ != "seven_day" or win_bounds(kind_, ra)[1] <= oldest:
         continue
-    lst = [x for x in samples if x.get("kind") == "five_hour" and x.get("resetsAt") == ra]
-    top = max(lst, key=lambda x: x["pct"])
-    _per1[ra] = totals(st, min(en, cut(top)))["listUnits"] / top["pct"] if top["pct"] > 0 else 0
-_mid = median([p for p in _per1.values() if p > 0])
-for ra, p1 in _per1.items():
-    p1 = p1 if p1 > 0 else _mid
-    for at, dp in elsewhere_ticks("five_hour", ra, p1):
-        if at < _cover:
+    p7 = else_fit(kind_, ra)[0]
+    if p7 <= 0:
+        continue
+    st, _ = win_bounds(kind_, ra)
+    if lst[0]["at"] > st:
+        lst = [{"at": st, "pct": 0, "ts": 1}] + lst
+    for a, b in zip(lst, lst[1:]):
+        dp = b["pct"] - a["pct"]
+        if dp < 2 or a["at"] < oldest:
             continue
-        b = _fresh.setdefault(day_of(at)[0], {"m": {}, "p": {}, "h": [0] * 24, "r": 0, "n": 0})
-        b["e"] = b.get("e", 0) + round(dp * p1)
-_hdays, _hfull = hist_merge(_fresh, replace_from=day_of(_cover)[0])
+        here = lu_between(cut(a), cut(b))
+        if here - p7 >= 0.25 * p7 * dp:
+            continue
+        left = dp - (here + _seen(a["at"], b["at"])) / p7
+        if left >= 2:
+            _count(a["at"], b["at"], left * p7)
+_hdays, _hfull = hist_merge(_fresh, replace_from=day_of(_cover)[0], early=_early)
 # ---------------------------------------------------------------------------
 # Save this scan's meter readings to the shared tick log, under an exclusive
 # lock: read the newest log, add a reading only if its window's percent went

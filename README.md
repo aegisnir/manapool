@@ -42,7 +42,7 @@ A **History** pane (the ▤ button on the band, or `/manapool history`), over 7,
 | Daily | Work per day, stacked by model, in % of 7D. Hatched on top: elsewhere. |
 | 5H pace | This window against the middle half of past windows, with a projection to 100%. |
 | 7D pace | This week against an even pace to 100% at reset, and last week (the middle half of past weeks once there are 3), with a projection. |
-| Limit size | Work per 1% of 5H, one dot per finished window, dated, violet above the median and coral below. A falling line is a shrinking limit. |
+| Limit size | Work per 1% of 5H, one dot per finished window, dated, violet above the median and coral below. A falling line is a shrinking limit. Points moved elsewhere are left out. |
 | Limit by time | Work per 1% of 5H by weekday and 4-hour block, against the median. Shows whether the limit is bigger at night or on weekends. |
 | Projects | Work by the folder each session ran in. |
 | Hours | Work by weekday and hour of day. |
@@ -93,7 +93,7 @@ Anthropic does not publish how a subscription weighs different models and token 
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
 - Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed (Mythos too, until its price is added).
 - History: work is weighed at plain list prices (the same fixed weights as the ledger), and turned into % of 7D with the current 7D window's work per 1%. Re-reading counts cache reads. Days and hours are local time. Over 30 or 90 days a project can pass 100%: that is more than one week's limit.
-- It only sees Claude Code on the computer it runs on. Cloud sessions, claude.ai chat, the phone app and other computers also move the meter. They show as **elsewhere**: meter ticks with almost no work here behind them, weighed at that window's work per 1%. Elsewhere use that runs at the same time as work here can't be told apart from a smaller limit, so it is not counted (the Limit check shows it as 1% buying less).
+- It only sees Claude Code on the computer it runs on. Cloud sessions, claude.ai chat, the phone app and other computers also move the meter. They show as **elsewhere**: meter ticks with almost no work here behind them, weighed at that window's work per 1%. That includes use before the first reading of a window (a window starts at 0%) and 7D jumps of 2+ points while no session here read the meter. A day with no readings is marked not measured, not zero. Elsewhere use that runs at the same time as work here can't be told apart from a smaller limit, so it is not counted (the Limit check shows it as 1% buying less).
 
 List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row per model version (Haiku 5.5's long-prompt price is in `LONG`). Update them when prices change.
 
