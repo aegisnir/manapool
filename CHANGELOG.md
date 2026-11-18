@@ -2,6 +2,18 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.2 (2026-11-18)
+
+Fixes from the 0.7.1 review: elsewhere in every band size, one backfill at a time, no scans in sessions that never show the band, a steadier 7D pace, fast mode in forecasts.
+
+- **Elsewhere shows whenever above 0.**  It only showed inside the Limit check in Full, and only once there were past windows to compare with.  Full now shows it on the Limit check row on its own too, Mini has an **Elsewhere** group (dropped after Cache when the line is short of room), and the `/manapool` summary has a line.  The terminal draws the same rows.
+- **One backfill at a time.**  Every open session used to start its own one-time history backfill, and a failing one started again on every refresh.  `backfill.lock` now lets one run at a time across sessions (the others say "busy" and leave), and `backfill.json` makes a failed or killed run wait before the next try: 1 minute, doubling up to a day.  The normal scan reports when the next try may start, so no session starts a process just to hear "not yet".
+- **No scans in sessions that never show the band.**  Headless runs (`claude -p`, agent and workflow sessions) load the mod too, and each ran its own scan and store writes every 30 seconds (the review found 26 such sessions written in one minute).  Scans now wait for the first draw of the band or a pane, or for `/manapool`.  The terminal starts at once; a desktop-app session starts with no surface, so it waits for its first draw too.
+- **7D pace after time away.**  The 7D pace ran from the first reading of the last 24 hours, so a busy morning after a day or two away read as a whole day's pace packed into a few hours and showed a false red "runs out in 1d 8h".  It now runs from the meter's value 24 hours ago (the last reading at or before then) over the full 24 hours, and a 7D window under 3 hours old has no pace yet.  Replayed on one month of real readings, one evening read 40%/day before and 18%/day now.  The 5H pace is unchanged.
+- **Fast mode in forecasts.**  Next turn, the re-cache after the prompt cache expires, the hand-off cost and the turns re-priced on your own model ignored fast mode, so they read half the real cost.  They now carry it while you stay on that model, judged by the newest reply, so switching fast mode on or off changes every forecast at once.  Other models in the Other models table stay at standard speed: fast mode belongs to the model it was turned on for.
+- **Smaller fixes.**  A label such as "<0.01%" no longer breaks the bar or pill it is drawn in.  A window the scan returned no totals for draws as empty instead of stopping the band.  The Context pill counts auto-compacts only (a `/compact` you ran is a choice, not lost detail).  A pill that flickers at a threshold toasts once: a level re-arms after the pill has stayed better for 15 minutes.
+- **Band tests.**  `tests/band.test.tsx` draws the band through Claude Code's own test kit (`claude plugin test .`) on terminal and desktop: elsewhere in Full and Mini, the 7D pace after time away, the Context pill after a manual `/compact`, an escaped label, and a headless session that runs no scan.
+
 ## 0.7.1 (2026-11-18)
 
 Elsewhere catches use while no session is open here, leaves rounding out, and no longer shows one gap twice.

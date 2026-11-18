@@ -864,5 +864,73 @@ d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": led})
 check("busy: a tick right after work here is not elsewhere",
       sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
 
+# ---------------- v0.7.2 ----------------
+# 50. S2: one backfill at a time.  While another session holds backfill.lock,
+#     a second one says "busy" at once and writes nothing.
+import fcntl
+home = home_with({"x.jsonl": [asst(NOW - 60, "a", "claude-sonnet-5-5", i=10)]})
+dd = os.path.join(home, "data")
+os.makedirs(dd)
+held = open(os.path.join(dd, "backfill.lock"), "a+")
+fcntl.flock(held, fcntl.LOCK_EX)
+d = run_in(home, ["--backfill", f"--data-dir={dd}", f"--now={NOW}"])
+check("backfill: a second one at the same time says busy", d.get("backfill"), "busy")
+check("backfill: the busy one writes no history", os.path.exists(os.path.join(dd, "history.json")), False)
+fcntl.flock(held, fcntl.LOCK_UN); held.close()
+
+# 51. S2: a run that succeeds leaves no back-off and marks the history full.
+d = run_in(home, ["--backfill", f"--data-dir={dd}", f"--now={NOW}"])
+check("backfill: a free lock runs it", d.get("backfill"), 1)
+check("backfill: success leaves no back-off file", os.path.exists(os.path.join(dd, "backfill.json")), False)
+d = run_in(home, [NOW - 3600, f"--data-dir={dd}", f"--now={NOW}"])
+check("backfill: after success the scan reports no wait", d["_backfillNext"], 0)
+
+# 52. S2: a run that died (its state file left behind, as written before the
+#     run) makes the next wait 2 minutes after a second failure, and the
+#     normal scan reports when; a backfill asked for before then waits.
+os.remove(os.path.join(dd, "history.json"))
+with open(os.path.join(dd, "backfill.json"), "w") as f:
+    json.dump({"fails": 1, "next": NOW + 60}, f)
+d = run_in(home, [NOW - 3600, f"--data-dir={dd}", f"--now={NOW}"])
+check("backfill: the scan reports the wait after a failure", d["_backfillNext"], NOW + 60)
+d = run_in(home, ["--backfill", f"--data-dir={dd}", f"--now={NOW + 30}"])
+check("backfill: asked for during the wait, it waits", d.get("backfill"), "wait")
+st_ = json.load(open(os.path.join(dd, "backfill.json")))
+check("backfill: the wait is untouched by a refused run", st_["fails"], 1)
+# a run after the wait that crashes (here: history.json can't be written)
+# leaves the doubled wait behind, so it is not retried on every refresh
+os.remove(os.path.join(dd, "history.json"))
+os.makedirs(os.path.join(dd, "history.json"))
+env = dict(BASE_ENV, HOME=home)
+pr = subprocess.run([sys.executable, "-I", SCAN, "--backfill", f"--data-dir={dd}", f"--now={NOW + 61}"],
+                    input="{}", capture_output=True, text=True, env=env)
+st_ = json.load(open(os.path.join(dd, "backfill.json")))
+check("backfill: a crashed run exits with an error", pr.returncode != 0, True)
+check("backfill: a crashed run counts as a failure", st_["fails"], 2)
+check("backfill: the wait doubles after it", st_["next"], NOW + 61 + 120)
+shutil.rmtree(home)
+
+# 53. C1: fast mode in the forecasts.  The same turn, once fast and once at
+#     standard speed: re-priced on its own model the fast one costs FAST
+#     times as much (the next turn runs fast too), on another model the
+#     same (fast mode stays with its model); the session says it is fast.
+def one_turn(fast):
+    sid = "fff"
+    files = {f"{sid}.jsonl": [user(NOW - 300), asst(NOW - 290, "q1", "claude-opus-5-5", i=100, o=1000, fast=fast)]}
+    return run(files, [NOW - 3600, f"--session-id={sid}", f"--since5h={NOW - 3600}"])["_session"]
+fs, ss = one_turn(True), one_turn(False)
+check("fast: re-priced on its own model it stays fast", fs["turns"][0]["on"]["opus"], 2 * ss["turns"][0]["on"]["opus"], tol=1)
+check("fast: re-priced on another model it is standard", fs["turns"][0]["on"]["sonnet"], ss["turns"][0]["on"]["sonnet"], tol=1)
+check("fast: the session reports fast mode", (fs["fast"], ss["fast"], fs["fastX"]), (True, False, 2.0))
+# one source: after fast mode is switched off, the earlier fast turn is
+# forecast at standard speed (it would run at standard speed now)
+sid = "ggg"
+files = {f"{sid}.jsonl": [user(NOW - 300), asst(NOW - 290, "g1", "claude-opus-5-5", i=100, o=1000, fast=True),
+                          user(NOW - 200), asst(NOW - 190, "g2", "claude-opus-5-5", i=100, o=1000)]}
+gs = run(files, [NOW - 3600, f"--session-id={sid}", f"--since5h={NOW - 3600}"])["_session"]
+check("fast: after switching it off, an earlier fast turn forecasts at standard speed",
+      gs["turns"][0]["on"]["opus"], ss["turns"][0]["on"]["opus"], tol=1)
+check("fast: the turn as it ran still counts its fast price", gs["turns"][0]["u"], 2 * gs["turns"][1]["u"], tol=1)
+
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)

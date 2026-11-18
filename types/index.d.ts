@@ -17,7 +17,8 @@ export type Sample = { at: number; kind: string; pct: number; fresh?: number; lu
 // u = its work units, h = the part spent re-reading the old conversation,
 // f = the same turn in a fresh session after a hand-off, n = model calls.
 // on / onf = the same turn priced on each model: as it ran here, and in a new
-// session after a hand-off (work units, current weights).
+// session after a hand-off (work units, current weights; fast mode kept on
+// the model it ran on, standard speed on the others).
 export type Turn = { t: number; u: number; h: number; f: number; n: number; subs: number; out: number; ctx: number; k: string; live?: boolean; on?: Record<string, number>; onf?: Record<string, number> }
 // This session, from scan.py.
 export type Session = {
@@ -29,6 +30,8 @@ export type Session = {
   compactions: number; compactionsAll: number; lastCompact: number | null
   lastSeen: number | null; subagentCalls: number
   lastModel?: string | null  // family of the newest main-thread reply: whose prompt cache it is
+  fast?: boolean  // the newest main-thread reply ran in fast mode
+  fastX?: number  // what fast mode multiplies every price by
 }
 // One finished window, kept forever (the limit audit).
 export type LedgerRow = {

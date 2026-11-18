@@ -47,6 +47,14 @@ try:
 
     def unlock(f):
         fcntl.flock(f, fcntl.LOCK_UN)
+
+    def try_lock(f):
+        """Take the lock only if it is free right now (never wait)."""
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
 except ImportError:
     import msvcrt
 
@@ -66,6 +74,14 @@ except ImportError:
     def unlock(f):
         f.seek(0)
         msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def try_lock(f):
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta, timezone
 
@@ -242,6 +258,10 @@ def ts(s):
         return 0.0
 
 
+# Fast mode right now, and on which family: set once the transcripts are read
+# (the newest main-thread reply of this session).  Used by re-pricing only.
+FAST_NOW, FAST_FAM = False, ""
+
 # Fitted multipliers per token type (K) and per model (MM); 1.0 = list price.
 K = [1.0, 1.0, 1.0, 1.0]
 MM = {k: 1.0 for k in MODELS}
@@ -265,7 +285,12 @@ def units(c, model_key=None):
     if model_key is None:
         ww = w(c["k"], c["p"], c["v"], c.get("fast", False))
     else:
-        ww = w(model_key, c["p"])  # re-priced: at standard speed
+        # Re-priced as a forecast: fast exactly when fast mode is on NOW (the
+        # newest main reply ran fast) and on the family it is on (fast mode
+        # belongs to the model it was turned on for).  One source for every
+        # forecast, so after switching fast mode on or off the next turn
+        # does not read double or half for a few turns.
+        ww = w(model_key, c["p"], fast=FAST_NOW and model_key == FAST_FAM)
     return cost(c, ww)
 
 
@@ -592,7 +617,45 @@ def hist_merge(fresh, replace_from=None, fill_only=False, early=None):
             unlock(lk)
 
 
+# The backfill runs once per computer, not once per open session:
+# - backfill.lock: held for the whole run.  A session that finds it taken
+#   says "busy" and leaves (another session is already doing it).  A file of
+#   its own, so the shared `lock` (readings, history) is never held for the
+#   seconds a backfill takes.
+# - backfill.json: {"fails": n, "next": epoch}.  Written BEFORE the run as if
+#   it will fail, removed when it succeeds, so a run that crashes or is killed
+#   (its 10-minute timeout) counts as a failure too.  No session starts
+#   another before "next"; the wait doubles with each failure (1 minute up to
+#   a day).  The normal scan reports "next" (_backfillNext), so a session
+#   learns it without starting a process.
+BF_LOCK = os.path.join(data_dir, "backfill.lock") if data_dir else ""
+BF_FILE = os.path.join(data_dir, "backfill.json") if data_dir else ""
+BF_MAX_WAIT = 86400
+
+
+def bf_state():
+    try:
+        with open(BF_FILE) as f:
+            got = json.load(f)
+        return int(got.get("fails") or 0), float(got.get("next") or 0)
+    except Exception:
+        return 0, 0.0
+
+
 if backfill:
+    lk_ = None
+    if BF_LOCK:
+        os.makedirs(data_dir, exist_ok=True)
+        lk_ = open(BF_LOCK, "a+")
+        if not try_lock(lk_):
+            print(json.dumps({"backfill": "busy"}))
+            sys.exit(0)
+        fails_, next_ = bf_state()
+        if next_ > now:
+            print(json.dumps({"backfill": "wait", "next": next_}))
+            sys.exit(0)
+        with open(BF_FILE, "w") as f:
+            json.dump({"fails": fails_ + 1, "next": now + min(BF_MAX_WAIT, 60 * 2 ** fails_)}, f)
     # Every transcript, start to end, once.  The same reply can be logged more
     # than once (while it streams, and in forked or resumed sessions), so
     # calls are kept by message id, newest copy wins, as in the normal scan.
@@ -613,6 +676,11 @@ if backfill:
                 seen[key] = {"t": t, "k": fam, "v": ver_of(model), "model": model, "i": i, "o": o, "w": w_,
                              "w5": min(w5, w_), "r": r, "p": i + w_ + r, "fast": bool(fast), "proj": proj}
     days, full = hist_merge(roll(seen.values()), fill_only=True)
+    if BF_FILE:
+        try:
+            os.remove(BF_FILE)  # done: no back-off left
+        except OSError:
+            pass
     print(json.dumps({"backfill": len(seen), "days": len(days)}))
     sys.exit(0)
 
@@ -733,6 +801,8 @@ for path, e in entries.items():
 
 compactions.sort()
 auto_pre = [pre for _, pre in sorted(auto)]
+if last_main is not None:
+    FAST_NOW, FAST_FAM = bool(last_main["fast"]), last_main["k"]
 
 # Daily history: every day from the first midnight the scan fully covers.
 _cover = day_start(oldest)
@@ -1370,6 +1440,10 @@ if main_path or mine:
         # A prompt cache belongs to one model: the mod compares this with the
         # model you are on now to know whether the cache is still yours.
         "lastModel": (last_main["k"] + ("-" + last_main["v"] if last_main["v"] else "")) if last_main else None,
+        # The newest main reply ran in fast mode: the mod prices a reload or a
+        # hand-off on this model at the fast price (FAST times every price).
+        "fast": bool(last_main and last_main["fast"]),
+        "fastX": FAST,
         "subagentCalls": sum(1 for c in mine if c["sub"]),
     }
 out["_session"] = ses
@@ -1600,6 +1674,8 @@ if SAMPLES_FILE:
 
 out["_unpriced"] = unpriced  # model id -> calls left out (not in the price table)
 out["_history"] = {"full": _hfull, "days": {k: _hdays[k] for k in sorted(_hdays)[-HIST_SEND:]}}
+# When the next backfill may start (0: now), so a session waits out a failed one.
+out["_backfillNext"] = bf_state()[1] if BF_FILE and not _hfull else 0
 out["_byTime"] = out_by_time
 out["_ticks"] = len(samples)
 print(json.dumps(out))
