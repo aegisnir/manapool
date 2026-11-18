@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-17.8' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-18.1' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -340,7 +340,7 @@ const summaryText = (v: View, last: number | null, now: number): string => {
 // drawn on its own dark card so it reads the same in any app theme.
 // Pure: no `$`.
 // ---------------------------------------------------------------------------
-type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number }
+type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number; e?: number }
 // One colour per model, fixed: a colour follows its model, never its rank.
 // Checked as a set of six on every pair against the card (#262626) with the
 // dataviz validator: colour-blind dE >= 10.8, normal vision dE >= 20.
@@ -548,26 +548,41 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   {
     const H = 132, x0 = 34, top = 12, base = H - 16
     const totals = keys.map(k => dayTotal(D[k]))
-    const max = niceMax(val(Math.max(...totals, 0)) * 1.08)
+    // Elsewhere (scan.py elsewhere_ticks): meter movement with no work on this
+    // computer behind it.  Hatched on top of the day's bar, so it reads as not
+    // a model, and its legend entry names it (identity never by colour alone).
+    const elsew = keys.map(k => D[k]?.e ?? 0)
+    const anyElse = elsew.some(e => e > 0)
+    const tall = totals.map((t, i) => t + elsew[i])
+    const max = niceMax(val(Math.max(...tall, 0)) * 1.08)
     const sy = (x: number) => base - (x / max) * (base - top)
     const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
-    let out = `<defs>${present.map(m => gradDef(`d${m}`, MODEL_COL[m], true)).join('')}</defs>`
+    let out = `<defs>${present.map(m => gradDef(`d${m}`, MODEL_COL[m], true)).join('')}` +
+      `<pattern id="dElse" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
+      `<rect width="4" height="4" fill="${SURFACE}"/><line x1="0" y1="0" x2="0" y2="4" stroke="${DIM}" stroke-width="1.5"/></pattern></defs>`
     out += [0, max / 2, max].map(t => gridLine(x0, sy(t), tick(t))).join('')
     let peak = -1, hv = ''
-    totals.forEach((t, i) => { if (t > 0 && (peak < 0 || t > totals[peak])) peak = i })
+    tall.forEach((t, i) => { if (t > 0 && (peak < 0 || t > tall[peak])) peak = i })
     keys.forEach((k, i) => {
       const b = D[k]
       const x = x0 + i * sx + gap / 2
       const parts = present.map(m => [m, b?.m[m] ?? 0] as const).filter(p => p[1] > 0)
       let y = base, segs = ''
+      const e = elsew[i]
       parts.forEach(([m, u], j) => {
         const h = (val(u) / max) * (base - top)
         y -= h
-        const isTop = j === parts.length - 1
+        const isTop = j === parts.length - 1 && !(e > 0)
         // a 1px surface gap between stacked segments
         segs += isTop ? upBar(x, y, bw, Math.max(0.5, h - (j > 0 ? 1 : 0)), `url(#d${m})`)
           : `<rect x="${x}" y="${y + 1}" width="${bw}" height="${Math.max(0.5, h - 1)}" fill="url(#d${m})"/>`
       })
+      if (e > 0) {
+        // at least 2.5 px tall, so a small amount still shows its hatching
+        const h = Math.max(2.5, (val(e) / max) * (base - top))
+        y -= h
+        segs += upBar(x, y, bw, Math.max(0.5, h - (parts.length ? 1 : 0)), 'url(#dElse)')
+      }
       out += segs
     })
     // hover: the whole column (or week, see hoverSpans), so a thin or empty
@@ -578,21 +593,25 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const sum = totals.slice(a, z + 1).reduce((p, q) => p + q, 0)
       const parts = present.map(m => [m, keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.m[m] ?? 0), 0)] as const).filter(q => q[1] > 0)
       const calls = keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.n ?? 0), 0)
+      const es = elsew.slice(a, z + 1).reduce((p, q) => p + q, 0)
       hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
-        tipBox(cx, top, H, sum > 0 ? [name, `${valTxt(sum)}${per7 > 0 ? ` · ${fmt(sum)} units` : ''}`,
-          ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), `${calls} calls`] : [name, 'No work']))
+        tipBox(cx, top, H, sum + es > 0 ? [name, `${valTxt(sum + es)}${per7 > 0 && sum > 0 ? ` · ${fmt(sum)} units here` : ''}`,
+          ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), ...(es > 0 ? [`Elsewhere ${valTxt(es)}`] : []), `${calls} calls`] : [name, 'No work']))
     }
-    if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(totals[peak])) - 4, valTxt(totals[peak]).replace('~', ''), 'middle', INK)
+    if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(tall[peak])) - 4, valTxt(tall[peak]).replace('~', ''), 'middle', INK)
     const every = Math.ceil(keys.length / 5)
     keys.forEach((k, i) => { if ((keys.length - 1 - i) % every === 0) out += label(x0 + i * sx + sx / 2, H - 2, shortDay(k), 'middle') })
     out += hv
     const sum = totals.reduce((a, b) => a + b, 0)
+    const esum = elsew.reduce((a, b) => a + b, 0)
     daily = {
-      svg: svgDoc(H, out), alt: `Daily work over ${range} days, ${valTxt(sum)} in all`,
+      svg: svgDoc(H, out), alt: `Daily work over ${range} days, ${valTxt(sum)} in all${esum > 0 ? `, plus ${valTxt(esum)} elsewhere` : ''}`,
       right: unit === '% of 7D' ? '% of 7D per day' : 'work units per day',
-      legend: present.map(m => ({ name: cap(m), col: MODEL_COL[m] })),
+      legend: [...present.map(m => ({ name: cap(m), col: MODEL_COL[m] })), ...(anyElse ? [{ name: 'Elsewhere', col: DIM, glyph: '▨' }] : [])],
     }
     text.push(`Daily (${range}D): ${keys.slice(-7).map(k => `${shortDay(k)} ${valTxt(dayTotal(D[k]))}`).join(' · ')}`)
+    const e7 = elsew.slice(-7).reduce((a, b) => a + b, 0)
+    if (e7 > 0) text.push(`Elsewhere (7 days): ${valTxt(e7)}`)
   }
 
   // --- 5H pace: this window against the middle half of past windows ---
@@ -782,7 +801,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         const y = sy(r.per1 as number)
         const lines = [`${stamp(r.start * 1000).replace(/ [A-Z]{2,5}$/, '')} to ${hm(r.end * 1000)}`, `${r.pct}% used${sure(r) ? '' : ' · low confidence'}`,
           `${fmt(r.per1 as number)} work units per 1%`, ...(r.models?.length ? [r.models.join(' + ')] : []),
-          ...(r.outside > 0 ? [`${r.outside}% outside use`] : [])]
+          ...(r.outside > 0 ? [`${r.outside}% elsewhere`] : [])]
         out += hover(hitRect(sx(i) - cw / 2, top, cw, base - top), crossX(sx(i), top, base) + ring(sx(i), y), tipBox(sx(i), top, H, lines))
       })
       let right = `${rows.length} windows · too few to judge`
@@ -963,7 +982,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Turns**: one small bar per turn of this whole session: grey is the part spent **re-reading** the old conversation, violet the **new work**. Dim bars were before the current 5H window started (a thin line marks its start). Then the turn count, how much of the 5H limit this session has **used** since the window began, and its share of **last hour\'s use** (everything Claude Code used on this computer in the last hour, subagents included). Open the band in each session to see which one uses the most.')
   L.push('- **Context**: context size, how much of the window is used, how much it grows per turn, and how close auto-compact is, with the **Context pill**: a warning that the session is getting long enough for the model to lose track of earlier detail.')
   L.push('- **Cache**: the prompt cache clock. **Active** means the conversation is still in the prompt cache, so the next message reads it cheaply (a *cache read*). An hour after the last reply the cache **expires**, and the next message here costs extra to re-cache the whole conversation (a *cache write*), once. A cache belongs to one model: after switching models it shows **Model changed**, and the next message pays that re-cache too.')
-  L.push('- **Limit check** (once past windows are recorded): how much work 1% of the 5H limit buys in this window, against the usual amount. **Normal** within 15% of usual; red when it buys 15%+ less (a shrinking limit), or when the meter moved with no Claude Code use on this computer (**used outside Claude Code**: claude.ai chat or the phone app). "Work" is usage weighted by token type and model; see "Limit audit".')
+  L.push('- **Limit check** (once past windows are recorded): how much work 1% of the 5H limit buys in this window, against the usual amount. **Normal** within 15% of usual; red when it buys 15%+ less (a shrinking limit), or when the meter moved with no Claude Code use on this computer (**elsewhere**: see below). "Work" is usage weighted by token type and model; see "Limit audit".')
   L.push('- **Other models**: one column for each model you are not on, and two ways to move to it, each shown as a one-time cost, then the cost per turn after it. **Switch now**: this session changes model, so the whole conversation is cached on the new model once, and every later turn still re-reads it. **Hand off**: write a hand-off note here and start a new session on that model; it caches only its small start, and its turns carry no old conversation. Per-turn costs are the last 3 turns re-priced on that model (assuming it would use the same tokens: Fable tends to think more, Haiku to write less). Green marks the cheaper path over the next 5 turns. As a session grows, switching now costs more and handing off costs less.')
   L.push('- **▤ / ⓘ / ⊖ / ⊕**: the History pane / this manual / Mini (one line) / back to Full. Mini shows the bars with their percent inside, the last turn as a pill coloured by whichever of Cost and Context is worse (a dotted border for amber, dashed for red), and the cache clock.', '')
 
@@ -1004,12 +1023,12 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## Limit audit', '')
   L.push('Anthropic does not say how much work a 5H or 7D window holds. The **ledger** keeps one row per finished window, forever, so a shrinking limit shows up as a drop in **work units per 1%**. `/manapool export` writes it as a CSV (`~/Documents/Mana Pool/manapool-ledger.csv`).', '')
   L.push('- **Work units** weigh each token by type and model at API list prices for the exact model version, 1 unit = one Sonnet 5.5 input token. Raw token counts mislead: a cache-read token costs 1/50 to 1/200 of an output token, so light work in a long session looks huge in raw tokens. The ledger always uses plain list weights, so rows stay comparable even when the cost weights below are re-fitted.')
-  L.push('- **Outside use**: points the meter moved with almost no work on this computer behind them (under a quarter of a usual point). Claude.ai chat and the phone app\'s own chats share the limit but write nothing here, so this flags them; it cannot measure them. Remote Control sessions run on this computer and are counted.')
+  L.push('- **Elsewhere**: points the meter moved with almost no work on this computer behind them (under a quarter of a usual point). Cloud sessions, claude.ai chat, the phone app and other computers share the limit but write nothing here. Only such ticks count: elsewhere use that runs alongside work here moves the meter the same way a smaller limit would, so it shows in the limit check as buying less, not here. A window with no work here at all is only seen if a session here reads the meter before it resets. Remote Control sessions run on this computer and are counted as work here.')
   L.push('- **Meter** is the last reading seen in that window. If no session was open near its end, the true final figure may be a little higher.', '')
   if (ledger.length === 0) {
     L.push('_No finished window recorded yet._', '')
   } else {
-    L.push('| Window | Started | Models | Meter | Work units | Per 1% | Raw tokens | Outside use |', '|---|---|---|---|---|---|---|---|')
+    L.push('| Window | Started | Models | Meter | Work units | Per 1% | Raw tokens | Elsewhere |', '|---|---|---|---|---|---|---|---|')
     for (const r of [...ledger].sort((a, b) => b.start - a.start).slice(0, 40)) {
       L.push(`| ${r.kind === 'five_hour' ? '5H' : '7D'} | ${day(r.start * 1000)} | ${r.models.join(' + ') || '-'} | ${r.pct}% | ${fmt(r.units)} | ${r.per1 ? fmt(r.per1) : '-'} | ${fmt(r.tokens.reduce((a, b) => a + b, 0))} | ${r.outside ? `${r.outside}%?` : 'none'} |`)
     }
@@ -1019,11 +1038,11 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## History pane', '')
   L.push('The ▤ button (or `/manapool history`) opens charts of past use over 7, 30 or 90 days. Hover a bar, dot or cell for its numbers. Each model keeps one colour everywhere: Opus violet, Sonnet blue, Fable gold, Mythos orange, Haiku teal, grey for any other.')
   L.push('- **Tiles**: **7D used**; **Per day left**, what is left of 7D spread evenly over the days until it resets; **Re-reading**, the share of the last 7 days spent re-reading the conversation.')
-  L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading).')
+  L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading). Hatched on top: **elsewhere**, each elsewhere point times its window\'s work per 1%, on the day of the reading that showed it. Days before Mana Pool kept readings show none.')
   L.push('- **5H pace**: this window\'s readings against the middle half of past windows, with the projection to 100%.')
   L.push('- **7D pace**: this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
   L.push('- **Limit size**: work per 1% of 5H, one dot per finished window, dated by the day it started. Violet above the median (a bigger limit), coral below (a smaller one), grey near it, full colour at 20% off. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
-  L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Purple is a bigger limit, coral a smaller one. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and outside use. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done.')
+  L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Purple is a bigger limit, coral a smaller one. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
   L.push('- **Re-reading**: the share of work spent on cache reads, the old conversation sent again on every call. (The turn strip on the band counts a turn\'s re-reading more exactly.)')
@@ -1912,7 +1931,7 @@ export const register: Register = on => {
               {chkLow
                 ? <Text size="footnote" color={RED}>1% of 5H buys {chkCmp}</Text>
                 : <Text><Text size="footnote">normal</Text><Text {...fn}> · 1% of 5H buys {chkCmp}</Text></Text>}
-              {chk!.outside > 0 ? <Text size="footnote" color={RED}> · {chk!.outside}% used outside Claude Code</Text> : null}
+              {chk!.outside > 0 ? <Text size="footnote" color={RED}> · {chk!.outside}% elsewhere</Text> : null}
             </Text>
           </Box>
         ) : null}

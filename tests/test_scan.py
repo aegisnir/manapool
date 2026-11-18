@@ -581,5 +581,38 @@ kinds = sorted((s["kind"], s["pct"]) for s in d.get("_samples", []))
 check("tick log: a 60-day-old 7D reading stays, 5H and 200-day 7D go", kinds, [("seven_day", 50)])
 shutil.rmtree(home)
 
+# 32. Elsewhere: the meter moves 0 -> 10% with 1,000 units here, then
+#     10 -> 15% with nothing here (a cloud session, say).  The window buys
+#     1000 / 15 units per 1%, so the second tick is 5 x 66.7 = 333 units
+#     elsewhere, on the day of the reading that showed it.  The first tick
+#     has its work and is not counted.
+end = NOW + 3600
+st = end - 5 * 3600
+resets = iso(end)
+files = {"s.jsonl": [user(st + 300), asst(st + 600, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": resets},
+       {"at": st + 3600, "kind": "five_hour", "pct": 10, "resetsAt": resets},
+       {"at": st + 7200, "kind": "five_hour", "pct": 15, "resetsAt": resets}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+day = datetime.fromtimestamp(st + 7200).strftime("%Y-%m-%d")
+check("elsewhere: 5% with no local work, in list units", d["_history"]["days"].get(day, {}).get("e"), 333, tol=1)
+first = datetime.fromtimestamp(st + 3600).strftime("%Y-%m-%d")
+if first != day:
+    check("elsewhere: the tick with local work adds nothing", d["_history"]["days"].get(first, {}).get("e"), None)
+
+# 33. A window with no local work at all borrows the median units per 1% of
+#     the others (here one window at 100 per 1%): 4% moved = 400 units.
+end2 = NOW - 6 * 3600
+st2 = end2 - 5 * 3600
+r2 = iso(end2)
+files = {"s.jsonl": [user(st2 + 300), asst(st2 + 600, "m1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st2 + 60, "kind": "five_hour", "pct": 0, "resetsAt": r2},
+       {"at": st2 + 3600, "kind": "five_hour", "pct": 10, "resetsAt": r2},
+       {"at": st + 60, "kind": "five_hour", "pct": 0, "resetsAt": resets},
+       {"at": st + 3600, "kind": "five_hour", "pct": 4, "resetsAt": resets}]
+d = run(files, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+day = datetime.fromtimestamp(st + 3600).strftime("%Y-%m-%d")
+check("elsewhere: an all-elsewhere window uses the median per 1%", d["_history"]["days"].get(day, {}).get("e"), 400, tol=1)
+
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)

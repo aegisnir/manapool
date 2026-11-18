@@ -2,6 +2,17 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## 0.7.0 (2026-11-18)
+
+Elsewhere: meter movement that Claude Code on this computer did not cause.
+
+- **Elsewhere in the Daily chart.**  Cloud sessions, claude.ai chat, the phone app and other computers share the limit but write no transcripts here.  A 5H tick with under a quarter of a usual point of local work behind it (the rule the ledger already used for "outside use") is now drawn as a hatched grey segment on top of that day's bar, weighed at its window's work per 1%, and listed in the tooltip.
+- **Only lumpy ticks count.**  Elsewhere use that runs at the same time as work here moves the meter the same way a smaller limit would, so it stays in the Limit check as 1% buying less.  Counting it here too would flatten the Limit size chart by construction.
+- **A window with no local work at all** borrows the median work per 1% of the other windows, so it still shows.  It is only seen if a session here reads the meter before the window resets.
+- **"Outside use" is now "elsewhere"** in the band, the manual, the ledger table and the CSV column (`outside_use_pct` is now `elsewhere_pct`).  The stored field keeps its name, so old ledger rows still read.
+- **history.json** gains `e` per day (list units).  Days before this version have none.
+- Checks: the hatch stroke on the card is APCA Lc 44.6, and its nearest model colour (Haiku) is OKLab ΔE 12.6 away.  The pattern and legend carry identity, so colour alone is never relied on.
+
 ## 0.6.2 (2026-11-17)
 
 Manual wording, and README screenshots.

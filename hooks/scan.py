@@ -291,7 +291,7 @@ if export:
     os.makedirs(os.path.dirname(export), exist_ok=True)
     cols = ["window", "start", "end", "models", "meter_pct", "work_units_list", "units_per_1pct",
             "raw_input", "raw_output", "raw_cache_write", "raw_cache_read", "raw_total",
-            "outside_use_pct", "last_reading", "weights", "recorded"]
+            "elsewhere_pct", "last_reading", "weights", "recorded"]
     with open(export, "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(cols)
@@ -463,6 +463,9 @@ def parse(lines):
 #   h: work units per hour of the day (24 numbers)
 #   r: the part of those units spent re-reading the conversation (cache reads)
 #   n: model calls
+#   e: elsewhere, in list units: meter movement with no local work behind it
+#      (see elsewhere_ticks).  Absent on days with none, and on days before
+#      the field existed.
 # Kept in <data folder>/history.json.  Days the normal scan reaches are rebuilt
 # on every scan (it sees every call of those days); older days stay as they
 # were, so the file is the only place their history survives once Claude Code
@@ -716,7 +719,7 @@ auto_pre = [pre for _, pre in sorted(auto)]
 # Daily history: every day from the first midnight the scan fully covers.
 _cover = day_start(oldest)
 _fresh = roll([c for c in calls.values() if c["t"] >= _cover])
-_hdays, _hfull = hist_merge(_fresh, replace_from=day_of(_cover)[0])
+# Saved further down, once the Elsewhere share of each day is known.
 
 CALLS = sorted(calls.values(), key=lambda c: c["t"])
 prompts.sort()
@@ -1162,22 +1165,34 @@ out["_handoff"] = {"extra": HANDOFF_EXTRA, "noteOut": HANDOFF_NOTE_OUT}
 # reading seen, and the units are counted only up to that same moment: work
 # done after the last reading moved the meter unseen, so counting it would
 # make a percent look bigger than it was (and a later window look shrunk).
-# A tick with almost no local work behind it is "outside use" (claude.ai
-# chat or the phone app's own chats: the meter moved, nothing here did).
+# A tick with almost no local work behind it is "elsewhere" (cloud sessions,
+# claude.ai chat, the phone app, other computers: the meter moved, nothing
+# here did).  Only such lumpy ticks count.  Elsewhere work that runs
+# alongside local work can't be told apart from a smaller limit (both make
+# 1% buy less local work), so it stays in the limit check instead.
+# The ledger and history.json keep the field name "outside".
 # ---------------------------------------------------------------------------
-def outside(kind, resets_at, per1):
+def elsewhere_ticks(kind, resets_at, per1):
+    """[(reading time, % moved)] for each tick with under a quarter of the
+    local work its move would take (per1: list units per 1% in this window)."""
     lst = sorted([s for s in samples if s.get("kind") == kind and s.get("resetsAt") == resets_at], key=lambda s: s["at"])
     if per1 <= 0:
-        return 0
-    odd = 0
+        return []
+    odd = []
     for a, b in zip(lst, lst[1:]):
         dp = b["pct"] - a["pct"]
-        if dp <= 0:
+        # before `oldest` the scan has not read the calls, so no work would
+        # show and every tick would look like elsewhere
+        if dp <= 0 or a["at"] < oldest:
             continue
         u = sum(list_units(c) for c in calls_between(cut(a), cut(b)))
         if u < 0.25 * per1 * dp:
-            odd += dp
+            odd.append((b["at"], dp))
     return odd
+
+
+def outside(kind, resets_at, per1):
+    return sum(dp for _, dp in elsewhere_ticks(kind, resets_at, per1))
 
 
 new_rows = []
@@ -1249,6 +1264,32 @@ if starts and since5h:
     chk = {"per1": round(per1_now) if per1_now else None, "pct": cur_pct, "lo": round(lo_) if lo_ else None, "hi": round(hi_) if hi_ else None, "n": len(vals), "weights": fit["source"],
            "outside": outside("five_hour", rs, (cur["listUnits"] / cur_pct) if cur and cur_pct > 0 else 0) if rs else 0}
 out["_check"] = chk
+
+# Elsewhere per day (history.json "e"): each elsewhere tick's % moved, times
+# its window's list units per 1%, put on the day of the reading that showed
+# it.  Same rule and per-1% figure as the ledger, so the band's "elsewhere"
+# and the History pane agree.  A window with no local work at all has no
+# per-1% figure of its own; it borrows the median of the others.
+_per1 = {}
+for s in samples:
+    ra = s.get("resetsAt")
+    if s.get("kind") != "five_hour" or not ra or ra in _per1:
+        continue
+    st, en = win_bounds("five_hour", ra)
+    if en <= _cover:
+        continue
+    lst = [x for x in samples if x.get("kind") == "five_hour" and x.get("resetsAt") == ra]
+    top = max(lst, key=lambda x: x["pct"])
+    _per1[ra] = totals(st, min(en, cut(top)))["listUnits"] / top["pct"] if top["pct"] > 0 else 0
+_mid = median([p for p in _per1.values() if p > 0])
+for ra, p1 in _per1.items():
+    p1 = p1 if p1 > 0 else _mid
+    for at, dp in elsewhere_ticks("five_hour", ra, p1):
+        if at < _cover:
+            continue
+        b = _fresh.setdefault(day_of(at)[0], {"m": {}, "p": {}, "h": [0] * 24, "r": 0, "n": 0})
+        b["e"] = b.get("e", 0) + round(dp * p1)
+_hdays, _hfull = hist_merge(_fresh, replace_from=day_of(_cover)[0])
 # ---------------------------------------------------------------------------
 # Save this scan's meter readings to the shared tick log, under an exclusive
 # lock: read the newest log, add a reading only if its window's percent went

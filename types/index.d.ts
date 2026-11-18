@@ -44,8 +44,9 @@ export type Fit = {
 }
 // One local calendar day of work (scan.py's history.json): work units at list
 // prices per model (m), per project folder (p) and per hour of the day (h),
-// the part spent re-reading the conversation (r), and model calls (n).
-export type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number }
+// the part spent re-reading the conversation (r), model calls (n), and
+// elsewhere (e): meter movement with no local work behind it, in list units.
+export type HistDay = { m: Record<string, number>; p: Record<string, number>; h: number[]; r: number; n: number; e?: number }
 // full = older days were filled in from every transcript (the one-time backfill).
 export type History = { full: boolean; days: Record<string, HistDay> }
 // Limit by time (scan.py by_time): work per 1% of 5H by local weekday (Monday

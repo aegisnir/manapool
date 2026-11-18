@@ -31,7 +31,7 @@ A band above the prompt, in two sizes (Full and Mini):
 | Turns | One bar per turn: grey for re-reading the conversation, violet for new work. |
 | Context | Context size, growth per turn, and turns until auto-compact. |
 | Cache | Prompt cache active (and when it expires) or expired, with the cost to re-cache. |
-| Limit check | Whether 1% of 5H buys the usual amount of work. Flags meter movement with no Claude Code use behind it. |
+| Limit check | Whether 1% of 5H buys the usual amount of work, and how much of the meter moved **elsewhere** (with no Claude Code use on this computer behind it). |
 | Other models | One-time and per-turn cost of switching model now, or handing off to a new session on that model. |
 
 A **History** pane (the ▤ button on the band, or `/manapool history`), over 7, 30 or 90 days:
@@ -39,7 +39,7 @@ A **History** pane (the ▤ button on the band, or `/manapool history`), over 7,
 | Chart | Shows |
 |-------|-------|
 | Tiles | 7D used, how much of 7D is left per day until it resets, and the share of the last 7 days spent re-reading. |
-| Daily | Work per day, stacked by model, in % of 7D. |
+| Daily | Work per day, stacked by model, in % of 7D. Hatched on top: elsewhere. |
 | 5H pace | This window against the middle half of past windows, with a projection to 100%. |
 | 7D pace | This week against an even pace to 100% at reset, and last week (the middle half of past weeks once there are 3), with a projection. |
 | Limit size | Work per 1% of 5H, one dot per finished window, dated, violet above the median and coral below. A falling line is a shrinking limit. |
@@ -93,13 +93,13 @@ Anthropic does not publish how a subscription weighs different models and token 
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
 - Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed (Mythos too, until its price is added).
 - History: work is weighed at plain list prices (the same fixed weights as the ledger), and turned into % of 7D with the current 7D window's work per 1%. Re-reading counts cache reads. Days and hours are local time. Over 30 or 90 days a project can pass 100%: that is more than one week's limit.
-- It only sees Claude Code on the computer it runs on. Chat on claude.ai, other computers and the phone app also move the meter but are not counted (the Limit check can flag them, not measure them).
+- It only sees Claude Code on the computer it runs on. Cloud sessions, claude.ai chat, the phone app and other computers also move the meter. They show as **elsewhere**: meter ticks with almost no work here behind them, weighed at that window's work per 1%. Elsewhere use that runs at the same time as work here can't be told apart from a smaller limit, so it is not counted (the Limit check shows it as 1% buying less).
 
 List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row per model version (Haiku 5.5's long-prompt price is in `LONG`). Update them when prices change.
 
 ## Privacy
 
-It reads `~/.claude/projects/**/*.jsonl` on this computer and keeps token counts, times, model names, message ids and file paths (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` when set): `samples.jsonl` (the tick log: 5H readings kept 30 days, 7D readings 120 days), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript's full path and the full path of the folder each session ran in), `ticks.json` (each meter tick's percent and work per model, kept 180 days so the model weights outlive deleted transcripts) and `history.json` (one row per day for the History pane: work per model, per hour, and per project, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere, not even to Llama. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
+It reads `~/.claude/projects/**/*.jsonl` on this computer and keeps token counts, times, model names, message ids and file paths (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` when set): `samples.jsonl` (the tick log: 5H readings kept 30 days, 7D readings 120 days), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript's full path and the full path of the folder each session ran in), `ticks.json` (each meter tick's percent and work per model, kept 180 days so the model weights outlive deleted transcripts) and `history.json` (one row per day for the History pane: work per model, per hour, per project and elsewhere, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere, not even to Llama. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
 
 ## Files
 
