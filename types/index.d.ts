@@ -75,6 +75,8 @@ export type View = {
   long?: Record<string, { over: number; w: number[] }>  // long-prompt tier: past `over` tokens, weights `w`
   handoff?: { extra: number; noteOut: number }
   fit?: Fit
+  // Limit size: each finished 5H window's work per 1%, model-weighted, by resetsAt
+  limitSize?: Record<string, number>
   check?: Check | null
   ledgerCount?: number
   unpriced?: Record<string, number>  // model id -> calls left out: not in the price table

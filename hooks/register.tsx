@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-18.11' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-18.14' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -533,16 +533,36 @@ type HistView = {
 const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: number | null, now: number, width = 424): HistView => {
   HW = Math.max(300, Math.min(1100, Math.floor(width))) - 16 // the card adds 8 px each side
   const hist = v.history
-  const D = hist?.days ?? {}
+  const w7 = v.wins.find(w => w.kind === 'seven_day')
+  const w5 = v.wins.find(w => w.kind === 'five_hour')
+  // history.json keeps plain list-price units (a fixed yardstick).  The 7D
+  // meter weighs models like 5H does (Fable ~2x Opus per list unit), so at
+  // list prices a Fable day showed at about half its real share of 7D.  Each
+  // day is weighed here at the measured model weights (the same as the band's
+  // costs): model bars by their own weight, and the day's project, hour and
+  // re-reading figures by the day's mix.  Elsewhere has no model; it takes
+  // the current 7D window's mix (f7).
+  const MMw = v.fit?.MM ?? {}
+  const wOf = (name: string) => MMw[name] ?? 1
+  const f7 = w7 && (w7.tokens.listUnits ?? 0) > 0 && w7.tokens.units > 0 ? w7.tokens.units / (w7.tokens.listUnits as number) : 1
+  const D: Record<string, HistDay> = {}
+  for (const [k, b] of Object.entries(hist?.days ?? {})) {
+    const m: Record<string, number> = {}
+    let lu = 0, wu = 0
+    for (const [n, u] of Object.entries(b.m)) { m[n] = u * wOf(n); lu += u; wu += m[n]! }
+    const rr = lu > 0 ? wu / lu : 1
+    const p: Record<string, number> = {}
+    for (const [n, u] of Object.entries(b.p)) p[n] = u * rr
+    D[k] = { ...b, m, p, h: b.h.map(u => u * rr), r: b.r * rr, ...(b.e !== undefined ? { e: b.e * f7 } : {}) }
+  }
   const today = new Date(now)
   const keys: string[] = []
   for (let i = range - 1; i >= 0; i--) keys.push(keyOfDay(new Date(today.getFullYear(), today.getMonth(), today.getDate() - i)))
   const dayTotal = (b?: HistDay) => (b ? Object.values(b.m).reduce((a, x) => a + x, 0) : 0)
 
   // Work units -> % of the 7D limit: the current 7D window's highest reading
-  // (its list units over its percent), else the ledger's finished 7D windows.
-  const w7 = v.wins.find(w => w.kind === 'seven_day')
-  const w5 = v.wins.find(w => w.kind === 'five_hour')
+  // (its units over its percent, weighed by the window's model mix f7), else
+  // the ledger's finished 7D windows.
   const tick7 = v.samples.filter(s => s.kind === 'seven_day' && (s.lu ?? 0) > 0 && s.pct >= 3 && (!w7 || s.resetsAt === w7.resetsAt))
     .sort((a, b) => b.pct - a.pct)[0]
   const led7 = ledger.filter(r => r.kind === 'seven_day' && herePer1(r) > 0 && current(r)).map(herePer1)
@@ -552,7 +572,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   // stack past it: the same gap shown twice.
   const w7start = w7?.resetsAt ? Date.parse(w7.resetsAt) - 7 * 86400e3 : 0
   const e7 = w7start ? Object.entries(D).filter(([k]) => dayOfKey(k).getTime() >= new Date(w7start).setHours(0, 0, 0, 0)).reduce((a, [, b]) => a + (b.e ?? 0), 0) : 0
-  const per7 = tick7 ? ((tick7.lu as number) + e7) / tick7.pct : led7.length ? median(led7) : 0
+  const per7 = tick7 ? ((tick7.lu as number) * f7 + e7) / tick7.pct : led7.length ? median(led7) * f7 : 0
   const unit = per7 > 0 ? '% of 7D' : 'work units'
   const val = (u: number) => (per7 > 0 ? u / per7 : u)
   const valTxt = (u: number) => (per7 > 0 ? pctTxt(val(u)) : fmt(u))
@@ -825,25 +845,30 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   // --- Limit size: work per 1% of 5H, one dot per finished window ---
   let limit: Chart | null = null
   {
-    const rows = ledger.filter(r => r.kind === 'five_hour' && herePer1(r) > 0 && current(r)).sort((a, b) => a.start - b.start).slice(-40)
+    // Work per 1% at the current model weights (scan.py _limitSize), so a
+    // window run on a pricier model does not look like a smaller limit.
+    // Until the first scan sends it, plain list units.
+    const adj = v.limitSize
+    const per1Of = (r: LedgerRow) => (adj ? (adj[r.resetsAt] ?? 0) : herePer1(r))
+    const rows = ledger.filter(r => r.kind === 'five_hour' && per1Of(r) > 0 && current(r)).sort((a, b) => a.start - b.start).slice(-40)
     if (rows.length >= 2) {
       const H = 112, x0 = 38, top = 10, base = H - 16
-      const max = niceMax(Math.max(...rows.map(r => herePer1(r))) * 1.1)
+      const max = niceMax(Math.max(...rows.map(r => per1Of(r))) * 1.1)
       const sx = (i: number) => x0 + 8 + i * ((HW - x0 - 16) / (rows.length - 1)), sy = (x: number) => base - (x / max) * (base - top)
       const sure = (r: LedgerRow) => herePts(r) >= 15
-      const conf = rows.filter(sure).map(r => herePer1(r))
+      const conf = rows.filter(sure).map(r => per1Of(r))
       const med = conf.length ? median(conf) : 0
       let out = [0, max / 2, max].map(t => gridLine(x0, sy(t), t ? fmt(t) : '0')).join('')
       // The median line; its value is in the legend, where no dot covers it.
       if (med) out += `<line x1="${x0}" x2="${HW}" y1="${sy(med)}" y2="${sy(med)}" stroke="${DIM}" stroke-dasharray="4 4"/>`
-      out += `<path d="M${rows.map((r, i) => `${sx(i)},${sy(herePer1(r))}`).join(' L')}" fill="none" stroke="${GRID}" stroke-width="2"/>`
+      out += `<path d="M${rows.map((r, i) => `${sx(i)},${sy(per1Of(r))}`).join(' L')}" fill="none" stroke="${GRID}" stroke-width="2"/>`
       // Each dot against the median: violet a bigger limit, coral a smaller
       // one, grey near it, full colour at 20% off (the rule Limit by time uses).
       rows.forEach((r, i) => {
         const s = sure(r)
-        const off = med ? (herePer1(r) - med) / med : 0
+        const off = med ? (per1Of(r) - med) / med : 0
         const c = mix(DIM, off >= 0 ? ME : CORAL, Math.min(1, Math.abs(off) / 0.2))
-        out += `<circle cx="${sx(i)}" cy="${sy(herePer1(r))}" r="4" fill="${s ? c : SURFACE}" stroke="${s ? SURFACE : c}" stroke-width="${s ? 2 : 1.5}"/>`
+        out += `<circle cx="${sx(i)}" cy="${sy(per1Of(r))}" r="4" fill="${s ? c : SURFACE}" stroke="${s ? SURFACE : c}" stroke-width="${s ? 2 : 1.5}"/>`
       })
       // a date under the first window of each day, a tick mark on every new
       // day; a label is skipped where it would run into the one before
@@ -858,16 +883,16 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       // hover: one column per window
       const cw = rows.length > 1 ? sx(1) - sx(0) : 20
       rows.forEach((r, i) => {
-        const y = sy(herePer1(r))
+        const y = sy(per1Of(r))
         const lines = [`${stamp(r.start * 1000).replace(/ [A-Z]{2,5}$/, '')} to ${hm(r.end * 1000)}`, `${r.pct}% used${sure(r) ? '' : ' · low confidence'}`,
-          `${fmt(herePer1(r))} work units per 1%`, ...(r.models?.length ? [r.models.join(' + ')] : []),
+          `${fmt(per1Of(r))} work units per 1%`, ...(r.models?.length ? [r.models.join(' + ')] : []),
           ...(r.outside > 0 ? [`${r.outside}% elsewhere`] : [])]
         out += hover(hitRect(sx(i) - cw / 2, top, cw, base - top), crossX(sx(i), top, base) + ring(sx(i), y), tipBox(sx(i), top, H, lines))
       })
       let right = `${rows.length} windows · too few to judge`
       if (conf.length >= 8) { // fewer reliable windows than this is noise
         const recent = median(conf.slice(-3)), chg = med > 0 ? (recent - med) / med : 0
-        right = Math.abs(chg) < 0.1 ? `Steady · ${conf.length} windows` : `${chg < 0 ? 'Down' : 'Up'} ${Math.round(Math.abs(chg) * 100)}% lately`
+        right = Math.abs(chg) < 0.15 ? `Steady · ${conf.length} windows` : `${chg < 0 ? 'Down' : 'Up'} ${Math.round(Math.abs(chg) * 100)}% lately`
       }
       limit = {
         svg: svgDoc(H, out), alt: `Work per 1% of 5H over ${rows.length} finished windows${med ? `, median ${fmt(med)}` : ''}`,
@@ -1083,7 +1108,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## Limit audit', '')
   L.push('Anthropic does not say how much work a 5H or 7D window holds. The **ledger** keeps one row per finished window, the newest 3,000 (well over a year of heavy use), so a shrinking limit shows up as a drop in **work units per 1%**. `/manapool export` writes it as a CSV (`~/Documents/Mana Pool/manapool-ledger.csv`).', '')
   L.push('- **Work units** weigh each token by type and model at API list prices for the exact model version, 1 unit = one Sonnet 5.5 input token. Raw token counts mislead: a cache-read token costs 1/50 to 1/200 of an output token, so light work in a long session looks huge in raw tokens. The ledger always uses plain list weights, so rows stay comparable even when the cost weights below are re-fitted.')
-  L.push('- **Elsewhere**: points the meter moved with almost no work on this computer behind them (under a quarter of a usual point). Cloud sessions, claude.ai chat, the phone app and other computers share the limit but write nothing here. Only such ticks count: elsewhere use that runs alongside work here moves the meter the same way a smaller limit would, so it shows in the limit check as buying less, not here. A window starts at 0%, so use before the first reading here (a cloud session while no session was open) counts too. A whole 5H window used elsewhere that resets before a session here reads the meter shows only on 7D: a 7D jump of 2+ points with almost no work here, less what 5H ticks already counted, counts as well. A tick only counts when this computer was quiet around it: the meter lags the work and shows whole points, so the work of the 15 minutes before a tick counts towards it, plus under a point of rounding from earlier. Use elsewhere at the same time as work here can\'t be told from that lag. On 7D, where every quiet night ticks 1 point, it takes 2. Elsewhere ticks are left out of the model weights. Each point is weighed at the window\'s work here over the points that work moved; a window with under 3 such points borrows the usual figure. Remote Control sessions run on this computer and are counted as work here.')
+  L.push('- **Elsewhere**: points the meter moved with almost no work on this computer behind them (under a quarter of a usual point). Cloud sessions, claude.ai chat, the phone app and other computers share the limit but write nothing here. Only such ticks count: elsewhere use that runs alongside work here moves the meter the same way a smaller limit would, so it shows in the limit check as buying less, not here. A window starts at 0%, so use before the first reading here (a cloud session while no session was open) counts too. A whole 5H window used elsewhere that resets before a session here reads the meter shows only on 7D: a 7D jump of 2+ points with almost no work here, less what 5H ticks already counted, counts as well. A call still running at a reading counts towards it (a reply is logged when it finishes, but the meter counts it while it runs). A tick only counts when this computer was quiet around it: the meter lags the work and shows whole points, so the work of the 15 minutes before a tick counts towards it, plus under a point of rounding from earlier. Use elsewhere at the same time as work here can\'t be told from that lag. On 7D, where every quiet night ticks 1 point, it takes 2. Elsewhere ticks are left out of the model weights. Each point is weighed at the window\'s work here over the points that work moved; a window with under 3 such points borrows the usual figure. Remote Control sessions run on this computer and are counted as work here.')
   L.push('- **Meter** is the last reading seen in that window. If no session was open near its end, the true final figure may be a little higher.', '')
   if (ledger.length === 0) {
     L.push('_No finished window recorded yet._', '')
@@ -1101,7 +1126,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading). Hatched on top: **elsewhere**, each elsewhere point times its window\'s work per 1%, on the day of the reading that showed it (the tooltip says "since" when it started on an earlier day). Elsewhere only shows between two readings, so a day with none says **not measured**.')
   L.push('- **5H pace**: this window\'s readings against the middle half of past windows, with the projection to 100%.')
   L.push('- **7D pace**: this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
-  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window, dated by the day it started. Violet above the median (a bigger limit), coral below (a smaller one), grey near it, full colour at 20% off. Hollow dots used under 15% (elsewhere points not counted) and are noisy; it calls a trend only from 8 solid windows. Elsewhere points are left out of each window\'s figure, and a window with under 3 points of work here has no dot.')
+  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window, dated by the day it started. Work is weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. Violet above the median (a bigger limit), coral below (a smaller one), grey near it, full colour at 20% off. Hollow dots used under 15% (elsewhere points not counted) and are noisy; it calls a trend only from 8 solid windows. Elsewhere points are left out of each window\'s figure, and a window with under 8 points of work here has no dot (the meter shows whole points, so smaller windows read 15 to 40% low). A change only counts as "Down" or "Up" at 15% or more: windows normally scatter 5 to 7%, and a run of Fable-heavy windows can sit about 9% low.')
   L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Purple is a bigger limit, coral a smaller one. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
@@ -1111,7 +1136,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## Model cost on this meter', '')
   if (fit) {
     const ms = fit.measured ?? {}
-    L.push('How much each model moves the 5H meter per unit of list-price work, against the average tick. 1.0x = exactly what its list price says. **Measured** adds up every tick done 85%+ on one model (one tick alone is too noisy). **Used in costs** starts at 1.0x and moves toward the measured value as ticks build up, so it corrects itself with use. Recent ticks count more (a tick 30 days old counts half), and ticks are kept 180 days, so a change in how the plan weighs a model shows up within weeks.', '')
+    L.push('How much each model moves the 5H meter per unit of list-price work, against Opus (Opus = 1.0x), a fixed ruler, so the figures stay comparable when your mix of models changes. With under 15 Opus ticks the ruler is the average tick instead. 1.0x = the same as Opus per unit of list price. **Measured** adds up every tick done 85%+ on one model (one tick alone is too noisy). **Used in costs** starts at 1.0x and moves toward the measured value as ticks build up, so it corrects itself with use. Recent ticks count more (a tick 30 days old counts half), and ticks are kept 180 days, so a change in how the plan weighs a model shows up within weeks.', '')
     L.push('| Model | Measured | Ticks | Used in costs | 90% range |', '|---|---|---|---|---|')
     for (const k of MODELS) {
       const m = ms[k]
@@ -1124,13 +1149,13 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('Anthropic publishes none of this: how a plan weighs models and token types is not public. Every cost here is an estimate, built from two things that are measured (your transcripts and the meter) and one assumption (list prices as the starting point).')
   L.push('- **The meter shows whole points only.** Most ticks move exactly 1 point, so a single tick can be off by up to a point. Only many ticks together say anything.')
   L.push('- **Model weights are measured.** On one user\'s two weeks (41 windows, checked in November 2026 by a replay and an independent review), predicting each window\'s points from its work missed by about 28% at list prices and about 4 to 6% with the model weights, held out window by window. Rounding alone accounts for about 2%.')
-  L.push('- **Token-type weights are not.** Whether cache reads cost more or less than the price list says could not be told apart from the model weights: Fable work is mostly output, Opus work mostly re-reading, so "reads are cheap" and "Fable costs more" fit the meter equally well. Adding a read factor did not predict held-out windows better, so all token types stay at list prices. If reads really cost less than listed, the weight of a re-reading-heavy model (Opus) carries that, and long-session costs on another model are off by the same amount.')
+  L.push('- **Token-type weights are not.** Whether cache reads cost more or less than the price list says could not be told apart from the model weights: Fable work is mostly output, Opus work mostly re-reading, so "reads are cheap" and "Fable costs more" fit the meter equally well. Adding a read factor did not predict held-out windows better, so all token types stay at list prices. If reads really cost less than listed, the weight of a re-reading-heavy model (Opus) carries that, and long-session costs on another model are off by the same amount. An independent check on Opus-only windows hints that Opus output may count about 1.5x list and cache reads about 0.7x (wide ranges, 26 windows): if so, a read-heavy window looks up to about 10% bigger than it is.')
   L.push('- **Your numbers are your own.** The figures above are one person\'s; the table above shows yours, with each weight\'s 90% range. A model you rarely use (under a few ticks of work) stays at its list price.')
   L.push('- **What it cannot see:** use elsewhere at the same moment as work here (it reads as a smaller limit), changes Anthropic makes to the plan between ticks, and anything about answer quality.', '')
 
   L.push('## How the costs are worked out', '')
   L.push('1. Every model call in the transcripts is priced in work units at the current weights.')
-  L.push('2. **Rate**: the 5H meter\'s percent over this window\'s work units (carried over from the last window until this one reaches 3%).')
+  L.push('2. **Rate**: the 5H meter\'s percent over this window\'s work units (carried over from the last window until this one reaches 8%).')
   L.push('3. A turn = one prompt to the next: every call between them, subagents included. **Re-reading** is the old conversation (context at the turn\'s start minus the context the session started from) read on each main call; from the prompt cache it is a cheap cache read; after the cache expired it is a full cache write.')
   L.push(`4. **New session** = the same turn minus the re-reading, plus reading a hand-off allowance of ${grp(v?.handoff?.extra ?? 15000)} tokens per call (the note and a few re-read files). An assumption; real hand-offs vary.`)
   L.push(`5. **Pays back in N turns** = the one-time cost of a hand-off (about ${grp(v?.handoff?.noteOut ?? 3000)} output tokens to write the note, plus the new session storing its starting context) over the saving per turn (median of the last 3 turns).`)
@@ -1432,7 +1457,10 @@ export const register: Register = on => {
       // % of the 5H limit per work unit: trusted from 3% into the window,
       // carried over from the last window before that.
       const w5 = wins.find(w => w.kind === 'five_hour')
-      const saved = (await io.get('rate').catch(() => undefined)) as number | undefined
+      // 'rate-opus': the rate in work units measured against Opus (0.7.7).
+      // A rate saved under the old ruler ('rate') is left unused, or costs
+      // would read about 27% high until this window reached 8%.
+      const saved = (await io.get('rate-opus').catch(() => undefined)) as number | undefined
       // Only the points the work here moved: points moved elsewhere (cloud,
       // chat, phone) are in the meter but not in the work, and would make
       // every cost on the band read high (a window run to 30% in the cloud
@@ -1441,14 +1469,14 @@ export const register: Register = on => {
       // after it has not shown on the meter yet, and made costs read low).
       const fresh5 = typeof sums._rate5 === 'number' && sums._rate5 > 0 ? (sums._rate5 as number) : undefined
       const rate = fresh5 ?? saved
-      if (fresh5 && fresh5 !== saved) await save(io, 'rate', fresh5, nowMs)
+      if (fresh5 && fresh5 !== saved) await save(io, 'rate-opus', fresh5, nowMs)
       const nv: View = {
         wins, samples, updatedAt: now, ctx, model, rate,
         // auto-compact switched off: no trigger point, so no "auto-compact in N turns"
         compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
         session: sums._session ?? undefined, weights: sums._weights, long: sums._long, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
-        unpriced: sums._unpriced, history: sums._history, byTime: sums._byTime ?? undefined,
+        unpriced: sums._unpriced, history: sums._history, byTime: sums._byTime ?? undefined, limitSize: sums._limitSize ?? undefined,
       }
       await io.show(() => nv)
       // The History pane's copy: first time, when the older days arrive, or

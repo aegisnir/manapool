@@ -211,3 +211,30 @@ test('Mythos 5.2 is priced on the band', async ($, on) => {
   expect(await words(ui)).not.toMatch(/Unpriced|unpriced/)
   await ui.unmount()
 })
+
+// B: History's % of 7D weighs each model.  The 7D reading says 100,000 list
+// units bought 10% (so 10,000 per 1%, mix weight 1.0).  Today Fable did
+// 100,000 list units, and the meter weighs Fable 2x: 20% of 7D, not 10%.
+test('History: a Fable day shows at its weighed share of 7D', async ($, on) => {
+  const d = new Date(), key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const ra = iso(NOW + 3 * 86400e3)
+  const view = viewOf(12, 10, {
+    wins: [{ kind: 'seven_day', pct: 10, resetsAt: ra, tokens: { ...tok, units: 100000, listUnits: 100000 } }],
+    samples: [{ at: NOW / 1000 - 600, kind: 'seven_day', pct: 10, lu: 100000, resetsAt: ra }],
+    fit: { source: 'fit-models', ticks: 0, K: [1, 1, 1, 1], MM: { fable: 2, opus: 1 }, model_ticks: {} },
+    history: { full: true, days: { [key]: { m: { fable: 100000 }, p: { x: 100000 }, h: Array(24).fill(0), r: 0, n: 1 } } },
+  })
+  on('state.get', (_: unknown, e: any) => {
+    if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+    if (e.key === 'range') return { value: { value: { shape: 'range-1', value: 7 }, version: 1 } }
+    return { value: { value: undefined, version: 0 } }
+  })
+  on('store.get', () => ({ value: [] }))
+  const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+    props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+  // the Daily chart's peak label and tooltip carry the day's share
+  const src = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? '')).join('\n')
+  expect(src).toMatch(/>20\.0%</)
+  expect(src).not.toMatch(/>10\.0%</)
+  await ui.unmount()
+})

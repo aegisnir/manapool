@@ -252,14 +252,12 @@ def key_of(model):
     # unknown model, never priced as Fable or as another version.
     if "mythos" in m:
         return "mythos" if ("mythos", ver_of(m)) in PRICES else ""
-    if "fable" in m:
-        return "fable"
-    if "opus" in m:
-        return "opus"
-    if "haiku" in m:
-        return "haiku"
-    if "sonnet" in m:
-        return "sonnet"
+    # A known family on a version the price table does not list (a new one,
+    # or an old id with no version) is left out and listed too: pricing it as
+    # the newest version would be a guess.
+    for fam in ("fable", "opus", "haiku", "sonnet"):
+        if fam in m:
+            return fam if (fam, ver_of(m)) in PRICES else ""
     return ""  # unknown: left unpriced (and listed), never guessed
 
 
@@ -420,7 +418,8 @@ RULE = 4
 # kept as it is otherwise (unlike RULE, an old count does not drop the row).
 # 2: 0.7.1: window start counts as a reading, 1-point rounding ticks left
 #    out, weighed by the work here
-ORULE = 2
+# 3: 0.7.7: a call already running at a reading counts towards it (LONGEST)
+ORULE = 3
 # A row is also redone when the log holds a higher reading for its window
 # than the row used (a session saved its reading after another session had
 # already closed the window).
@@ -824,6 +823,9 @@ for path, e in entries.items():
              "main": is_main and not side, "sub": bool(is_sub or (is_main and side)), "stop": stop,
              "proj": proj_of(e.get("cwd", ""))}
         prev = calls.get(key)
+        # when this reply first appeared (its first streamed copy): the call
+        # was running from then on (see LONGEST)
+        c["t0"] = min(t, prev.get("t0", prev["t"])) if prev is not None else t
         # The same reply can be logged more than once: while it streams
         # (keep the newest copy's token counts) and in a forked or resumed
         # session's transcript (a copy of the parent's history).  Whether
@@ -837,6 +839,7 @@ for path, e in entries.items():
         else:
             prev["main"] = prev["main"] or c["main"]
             prev["sub"] = prev["sub"] or c["sub"]
+            prev["t0"] = min(prev.get("t0", prev["t"]), t)
         if c["main"] and (last_main is None or t >= last_main["t"]):
             last_main = c
 
@@ -903,6 +906,13 @@ for c in CALLS:
     _LU.append(_LU[-1] + list_units(c))
 
 
+def running_at(t):
+    """List units of the calls already running at time t: first logged at or
+    before t, finished after it (see LONGEST)."""
+    return sum(list_units(c) for c in CALLS[bisect_right(CALL_TS, t):bisect_right(CALL_TS, t + LONGEST)]
+               if c.get("t0", c["t"]) <= t)
+
+
 def lu_between(a, b):
     """List units of the calls with a < time <= b (calls_between's range)."""
     return _LU[bisect_right(CALL_TS, b)] - _LU[bisect_right(CALL_TS, a)]
@@ -955,6 +965,16 @@ def per1_or_usual(kind, per1):
 # was under 5 minutes long with points of work here just before it.
 CARRY_ROUND = 0.95  # points
 QUIET = 900         # seconds
+# A reply is logged several times while it streams; the scan keeps the last
+# copy's time (when it finished), but the meter counts the call while it
+# runs.  A long call (a big cache rewrite, a long answer) can move the meter
+# minutes before it finishes: on 2026-11-18 a 1.2M-unit call that started
+# 61 s before a 2-point jump and finished 98 s after it made the jump look
+# like use elsewhere.  So a call already running at a reading (its first
+# copy at or before the reading, its last after) counts towards that tick,
+# for this test only (it still belongs to the next tick everywhere else).
+# Only calls finishing within LONGEST of the reading are looked at.
+LONGEST = 1800      # seconds
 
 
 def elsewhere_ticks(kind, resets_at, per1, fam=None):
@@ -993,7 +1013,8 @@ def elsewhere_ticks(kind, resets_at, per1, fam=None):
         # work of the quiet seconds before the tick (not before the window:
         # that work belongs to the last window's meter)
         near = lu_between(max(st, cut(a) - QUIET), cut(a)) if st else 0.0
-        if dp > 0 and carry + near + own < 0.25 * per1 * dp and (kind == "five_hour" or dp >= 2):
+        ahead = running_at(cut(b))
+        if dp > 0 and carry + near + own + ahead < 0.25 * per1 * dp and (kind == "five_hour" or dp >= 2):
             odd.append((a["at"], b["at"], dp))
             left = carry + own  # these points were not this work's
         else:
@@ -1215,6 +1236,22 @@ for a, b, dp, groups, _n in all_ticks:
     if k in pool and v / tot >= DOMINANT:
         pool[k].append((wt, dp, tot))
 ref = ref_y / ref_x if ref_x > 0 else 0.0
+# Anchor: every model is measured against Opus (Opus = 1.0x), not against the
+# average of whatever was used recently.  Against the average, every weight
+# moved whenever the mix moved: on two weeks of real data Fable went 1.58x ->
+# 1.76x and Opus 0.74x -> 0.84x between the halves while Fable/Opus held at
+# 2.15 -> 2.09.  A fixed ruler keeps stored figures comparable across weeks;
+# the shape of every chart and every cost on the band (a percent, re-measured
+# each window) is the same either way.  Opus has the most ticks for most users;
+# with under ANCHOR_MIN Opus ticks it falls back to the average.
+ANCHOR_MIN = 15
+_op = pool.get("opus") or []
+fit["anchor"] = "average"
+if len(_op) >= ANCHOR_MIN:
+    _sx = sum(wt * x for wt, y, x in _op)
+    if _sx > 0 and sum(wt * y for wt, y, x in _op) > 0:
+        ref = sum(wt * y for wt, y, x in _op) / _sx
+        fit["anchor"] = "opus"
 fit["measured"] = {}
 fit["kept"] = len(all_ticks)
 for k in MODELS:
@@ -1523,6 +1560,18 @@ rebuilt = {(r["kind"], r["resetsAt"]) for r in new_rows}
 kept = [r for r in ledger if (r.get("rule") or 0) >= RULE and (r.get("kind"), r.get("resetsAt")) not in rebuilt]
 full = [r for r in kept + new_rows if r.get("kind") == "five_hour" and here_pts(r) >= 20]
 vals = sorted(row_units(r) / here_pts(r) for r in full if row_units(r) > 0)
+# Limit size (the History pane): each finished 5H window's work per 1% of
+# work here, at the CURRENT model weights (as the Limit check above).  At
+# plain list prices a window run mostly on Fable buys about half the units of
+# an Opus one (the meter weighs Fable ~1.7x and Opus ~0.8x its list price),
+# so model mix read as a shrinking limit.  Keyed by resetsAt.  Only windows
+# with SIZE_MIN+ points of work here: the meter shows whole points and reads
+# about a quarter point above zero work, so on real data windows of 1 to 2
+# points read ~40% low and 3 to 7 points ~15% low; from 8 the spread is the
+# limit's own (5 to 7%).
+SIZE_MIN = 8
+out["_limitSize"] = {r["resetsAt"]: round(row_units(r) / here_pts(r)) for r in kept + new_rows
+                     if r.get("kind") == "five_hour" and here_pts(r) >= SIZE_MIN and row_units(r) > 0}
 chk = None
 if starts and since5h:
     cur = out.get(str(int(since5h)))
@@ -1546,9 +1595,10 @@ out["_check"] = chk
 # % of 5H per work unit for the band's costs: the points the work here moved,
 # over that work counted up to the newest reading (the ledger's rule).  Work
 # after the reading has not shown on the meter yet; counting it made every
-# cost read low.  None under 3 points: too coarse (the mod keeps its last one).
+# cost read low.  None under SIZE_MIN points: too coarse (see _limitSize), so
+# the mod keeps the last window's rate until then.
 out["_rate5"] = None
-if chk and cur and chk["herePct"] >= 3 and cur["units"] > 0:
+if chk and cur and chk["herePct"] >= SIZE_MIN and cur["units"] > 0:
     out["_rate5"] = chk["herePct"] / cur["units"]
 
 # Elsewhere per day, in history.json:

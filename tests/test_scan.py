@@ -970,5 +970,78 @@ check("claim: a later claim for the same window loses", run_in(home, [f"--data-d
 check("claim: the next window can be claimed", run_in(home, [f"--data-dir={dd}", f"--claim=wall5h|next"])["claimed"], True)
 shutil.rmtree(home)
 
+# 57. Limit size is weighed by model.  The meter here counts Fable at 2x
+#     Opus (weight_case).  A Fable window and an Opus window that each moved
+#     10 points for the same meter work: at list prices the Fable one buys
+#     half the units (a "smaller limit"); at the measured weights, the same.
+recs, smp = weight_case(20, 12, start)
+home = home_with({"w.jsonl": recs})
+dd = os.path.join(home, "data")
+led = [{"kind": "five_hour", "resetsAt": iso(NOW - 3 * 86400), "start": NOW - 3 * 86400 - 18000, "pct": 10, "outside": 0,
+        "per1": 500_000, "units": 5_000_000, "byModel": {"claude-fable-5-2": [0, 250_000, 0, 0, 0]}, "rule": RULE_NOW},
+       {"kind": "five_hour", "resetsAt": iso(NOW - 2 * 86400), "start": NOW - 2 * 86400 - 18000, "pct": 10, "outside": 0,
+        "per1": 1_000_000, "units": 10_000_000, "byModel": {"claude-opus-5-5": [0, 1_000_000, 0, 0, 0]}, "rule": RULE_NOW}]
+d = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "ledger": led})
+ls = d["_limitSize"]
+check("limit size: a Fable window is not a smaller limit", ls[iso(NOW - 3 * 86400)] / ls[iso(NOW - 2 * 86400)], 1.0, tol=0.15)
+check("limit size: at list prices it would have looked half", led[0]["per1"] / led[1]["per1"], 0.5)
+shutil.rmtree(home)
+
+# ---------------- v0.7.7 ----------------
+# 58. A: model weights are measured against Opus (Opus = 1.0x), a fixed
+#     ruler.  The meter here counts Fable 2x Opus (weight_case, 20 Opus ticks).
+recs, smp = weight_case(20, 12, start)
+d = run({"w.jsonl": recs}, [start], {"samples": smp, "ledger": []})
+check("anchor: the ruler is Opus", d["_fit"].get("anchor"), "opus")
+check("anchor: Opus is 1.0x", d["_fit"]["MM"]["opus"], 1.0, tol=0)
+check("anchor: Fable is 2x Opus", d["_fit"]["MM"]["fable"], 2.0, tol=0.15)
+# Few Opus ticks: the ruler stays the average tick.
+recs, smp = weight_case(5, 12, start)
+d = run({"w.jsonl": recs}, [start], {"samples": smp, "ledger": []})
+check("anchor: under 15 Opus ticks the ruler is the average", d["_fit"].get("anchor"), "average")
+
+# 59. C: windows with under 8 points of work here have no Limit size figure
+#     and give no rate (the meter's rounding makes them read low).
+led = [{"kind": "five_hour", "resetsAt": iso(NOW - 3 * 86400), "start": NOW - 3 * 86400 - 18000, "pct": 5, "outside": 0,
+        "per1": 100_000, "units": 500_000, "byModel": {"claude-opus-5-5": [0, 50_000, 0, 0, 0]}, "rule": RULE_NOW},
+       {"kind": "five_hour", "resetsAt": iso(NOW - 2 * 86400), "start": NOW - 2 * 86400 - 18000, "pct": 8, "outside": 0,
+        "per1": 100_000, "units": 800_000, "byModel": {"claude-opus-5-5": [0, 80_000, 0, 0, 0]}, "rule": RULE_NOW}]
+d = run({"x.jsonl": [asst(NOW - 60, "a", "claude-sonnet-5-5", i=10)]}, [NOW - 3600], {"samples": [], "ledger": led})
+check("8-point minimum: a 5-point window has no limit size", iso(NOW - 3 * 86400) in d["_limitSize"], False)
+check("8-point minimum: an 8-point window has one", iso(NOW - 2 * 86400) in d["_limitSize"], True)
+st = NOW - 3600; ra = iso(st + 5 * 3600)
+files = {"s.jsonl": [user(st + 60), asst(st + 120, "r1", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 30, "kind": "five_hour", "pct": 0, "resetsAt": ra, "ts": 1},
+       {"at": st + 600, "kind": "five_hour", "pct": 5, "resetsAt": ra, "ts": 1}]
+d = run(files, [st, f"--since5h={st}"], {"samples": smp, "ledger": []})
+check("8-point minimum: no rate from 5 points", d["_rate5"], None)
+
+# 60. F2: a known family on a version the price table does not list is left
+#     out and listed, not priced as the newest version.
+d = run({"s.jsonl": [asst(NOW - 600, "v1", "claude-opus-9-9", i=1000), asst(NOW - 590, "v2", "claude-3-5-sonnet-20241022", i=1000)]}, [NOW - 3600])
+check("unknown version: listed as unpriced", d["_unpriced"], {"claude-opus-9-9": 1, "claude-3-5-sonnet-20241022": 1})
+
+# 61. A call already running at a reading is not elsewhere.  Quiet computer,
+#     then a 10-point jump at T.  The reply that caused it is logged twice
+#     while it streams: first at T-60 (a partial copy), last at T+100 (when
+#     it finished, with the full count).  Counted at its finish only, the
+#     jump looked like use elsewhere (seen on real data 2026-11-18).
+end = NOW + 3600
+st = end - 5 * 3600
+T = st + 3 * 3600
+big = dict(o=20_000)          # Sonnet output: 100k list units
+part = asst(T - 60, "long1", "claude-sonnet-5-5", o=10)
+full = asst(T + 100, "long1", "claude-sonnet-5-5", **big)
+# 10 points of work in the first hour, read at 1 hour; then quiet until T
+smp = [{"at": st + 3600, "kind": "five_hour", "pct": 10, "resetsAt": iso(end), "ts": 1},
+       {"at": T, "kind": "five_hour", "pct": 20, "resetsAt": iso(end), "ts": 1}]
+before = [user(st + 300), asst(st + 400, "w1", "claude-sonnet-5-5", o=20_000)]   # 100k list units
+d = run({"s.jsonl": before + [user(T - 70), part, full]}, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+check("running call: a jump while a long call runs is not elsewhere", sum(v.get("e", 0) for v in d["_history"]["days"].values()), 0)
+# The same reply sent only after the reading (first copy after T): still elsewhere.
+late = asst(T + 30, "long1", "claude-sonnet-5-5", o=10)
+d = run({"s.jsonl": before + [user(T + 20), late, full]}, [NOW - 3 * 86400], {"samples": smp, "ledger": []})
+check("running call: a call started after the jump does not explain it", sum(v.get("e", 0) for v in d["_history"]["days"].values()) > 0, True)
+
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)

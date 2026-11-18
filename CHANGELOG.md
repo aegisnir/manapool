@@ -2,6 +2,19 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.7 (2026-11-18)
+
+Limit size now measures what the limit buys, not which model you used.  From an independent review of two weeks of real data: the limit held within about 5 to 9%, while raw per-window figures swung 2.6x with the share of Fable.
+
+- **Limit size is weighed by model.**  The History pane's dots used plain list prices, so a window run mostly on Fable (the meter weighs it about 2.2x Opus per list-price unit) read as a much smaller limit: about 500k work units per 1% against 950k for Opus windows.  The dots now use the measured model weights, as the Limit check already did.  On one user's windows the spread fell from 26% to 6%.  An injected 23% limit change still shows at 20 to 23% after weighing, so the weighing does not hide real changes (unless a change lines up exactly with Fable use).  The scanner sends each window's figure as `_limitSize`; the ledger and CSV keep the plain list-price figure.
+- **Model weights are measured against Opus.**  Opus is 1.0x and every other model is measured against it, a fixed ruler.  Against the average of recent use, every weight moved when the mix moved (both Fable and Opus rose 11 to 14% between two weeks while Fable/Opus held).  Charts keep their shape and band costs are unchanged (a percent, re-measured each window); stored figures now stay comparable across weeks.  With under 15 Opus ticks the ruler stays the average tick.  A model with no measurement (Haiku, Mythos) now counts like Opus per list-price unit.
+- **History's % of 7D is weighed by model.**  The 7D meter weighs Fable like 5H does, so at list prices a Fable day showed at about half its real share of 7D.  Daily, Projects, Hours and Re-reading now weigh each day's work by model.  `history.json` still stores list-price units.
+- **8-point minimum.**  The meter shows whole points and reads about a quarter point above zero work, so windows of 1 to 2 points read about 40% low and 3 to 7 about 15% low.  Limit size and the cost rate now need 8 points (was 3); until then the band uses the last window's rate.  The rate is stored under a new key, so the first window after updating shows costs from 8%.
+- **"Down N% lately" needs 15%** (was 10%): windows scatter 5 to 7%, and a run of Fable-heavy windows can sit about 9% low.
+- **No false "elsewhere" from long calls.**  A reply is logged when it finishes, but the meter counts it while it runs.  A long call (a big cache rewrite after a network error, here 1.2M units) moved the meter 2 points about a minute before it finished, so that jump was counted as use elsewhere when nothing else was running.  A call already running at a reading (its first streamed copy before the reading, its last after) now counts towards that tick.  Ledger rows are recounted under the new rule (`orule` 3).
+- **Unknown versions are listed, not guessed.**  A known model family on a version the price table lacks (or an old id with no version) was priced as the newest version; it is now left out and named in the manual, like Mythos Preview.
+- **Manual:** the model table says what its ruler is; "How accurate" notes that Opus output may count about 1.5x list and cache reads about 0.7x (unproven, wide ranges), so a read-heavy window can look up to about 10% bigger.
+
 ## 0.7.5 (2026-11-18)
 
 No number on the band changes.  The token-type fit is removed, and the README and manual now say how accurate the estimates are.
