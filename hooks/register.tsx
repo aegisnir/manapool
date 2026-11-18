@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-18.8' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-18.9' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -28,7 +28,10 @@ const HIST_EVERY_MS = 5 * 60 * 1000
 // The History pane's id.
 const HPANE = `${PANE}-history`
 
-const SPAN: Record<string, number> = { five_hour: 5 * 3600, seven_day: 7 * 86400 }
+// Window lengths in seconds.  Named windows are always there; a kind read
+// from data may not be, so a lookup by name can be undefined.
+type ByKind = { readonly five_hour: number; readonly seven_day: number; readonly [kind: string]: number | undefined }
+const SPAN: ByKind = { five_hour: 5 * 3600, seven_day: 7 * 86400 }
 // A window's totals when the scan returned none for it: zero, so the band draws.
 const NO_TOKENS = { input: 0, output: 0, cache_write: 0, cache_read: 0, messages: 0, units: 0, listUnits: 0, models: {} }
 // The prompt cache keeps the conversation for an hour after each reply
@@ -92,7 +95,7 @@ const median = (a: number[]) => {
   if (a.length === 0) return 0
   const s = [...a].sort((x, y) => x - y)
   const n = s.length
-  return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
+  return n % 2 ? s[(n - 1) / 2]! : (s[n / 2 - 1]! + s[n / 2]!) / 2
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +133,7 @@ const tone = (consumed: number) => hexOk(tipOk(consumed))
 const rgb = (x: string) => [1, 3, 5].map(i => parseInt(x.slice(i, i + 2), 16))
 const mix = (a: string, b: string, t: number) => {
   const x = rgb(a), y = rgb(b)
-  return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('')
+  return '#' + x.map((v, i) => Math.round(v + (y[i]! - v) * t).toString(16).padStart(2, '0')).join('')
 }
 const SURFACE = '#262626'
 // Colours: Runenir's hues (the shared -nir UI library) at the lightness and
@@ -164,7 +167,7 @@ const derive = (v: View, last: number | null, now: number) => {
   // long-prompt threshold (Haiku 5.5 over 100k) its higher tier applies.
   const wAt = (k: string, prompt: number) => {
     const lg = v.long?.[k]
-    return lg && prompt > lg.over ? lg.w : (W[k] ?? LISTW[k])
+    return lg && prompt > lg.over ? lg.w : (W[k] ?? LISTW[k] ?? LISTW.sonnet!)
   }
   const rate = v.rate ?? 0
   const ok = rate > 0
@@ -193,8 +196,9 @@ const derive = (v: View, last: number | null, now: number) => {
     const cur = useLu ? (w.tokens.listUnits as number) : w.tokens.input + w.tokens.output + w.tokens.cache_write
     const sizes: number[] = []
     for (let i = 1; i < L.length; i++) {
-      const dp = L[i].pct - L[i - 1].pct
-      if (dp > 0 && val(L[i]) > val(L[i - 1])) sizes.push((val(L[i]) - val(L[i - 1])) / dp)
+      const a = L[i - 1]!, b = L[i]!
+      const dp = b.pct - a.pct
+      if (dp > 0 && val(b) > val(a)) sizes.push((val(b) - val(a)) / dp)
     }
     const recent = sizes.slice(-3)
     const per = recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : w.pct > 0 ? cur / w.pct : 0
@@ -202,7 +206,7 @@ const derive = (v: View, last: number | null, now: number) => {
     if (!per || !lastS) return w.pct
     return w.pct + Math.min(0.99, Math.max(0, (cur - val(lastS)) / per))
   }
-  const HORIZON: Record<string, number> = { five_hour: 3600, seven_day: 86400 }
+  const HORIZON: ByKind = { five_hour: 3600, seven_day: 86400 }
   const pace = (w: Win) => { // % per hour over the last hour (5H) or day (7D) of real ticks
     const nowS = now / 1000
     const L = ticksOf(w)
@@ -213,8 +217,8 @@ const derive = (v: View, last: number | null, now: number) => {
       // morning after time away look like a day's pace packed into a few
       // hours (a false "runs out in 1d 8h").  A window under a day old is
       // measured from its start, at 0%.
-      const start = w.resetsAt ? Date.parse(w.resetsAt) / 1000 - SPAN.seven_day! : nowS - SPAN.seven_day!
-      const from = Math.max(start, nowS - HORIZON.seven_day!)
+      const start = w.resetsAt ? Date.parse(w.resetsAt) / 1000 - SPAN.seven_day : nowS - SPAN.seven_day
+      const from = Math.max(start, nowS - HORIZON.seven_day)
       const before = L.filter(x => x.at <= from).pop()
       // No reading from before then (none was taken: no session was open):
       // the first one after stands in, which can only make the pace lower.
@@ -226,10 +230,10 @@ const derive = (v: View, last: number | null, now: number) => {
       if (hours < 3) return 0
       return Math.max(0, (est(w) - base) / hours)
     }
-    let i = L.findIndex(x => x.at >= nowS - HORIZON[w.kind])
+    let i = L.findIndex(x => x.at >= nowS - (HORIZON[w.kind] ?? 0))
     if (i < 0) i = L.length - 1
-    if (i > 0 && nowS - L[i].at < 360) i -= 1 // the anchor must be a few minutes old
-    const start = w.resetsAt ? Date.parse(w.resetsAt) / 1000 - SPAN[w.kind] : nowS - SPAN[w.kind]
+    if (i > 0 && nowS - L[i]!.at < 360) i -= 1 // the anchor must be a few minutes old
+    const start = w.resetsAt ? Date.parse(w.resetsAt) / 1000 - (SPAN[w.kind] ?? 0) : nowS - (SPAN[w.kind] ?? 0)
     const anchor = i >= 0 ? L[i] : null
     const hours = (nowS - (anchor ? anchor.at : start)) / 3600
     if (hours < 0.1) return 0
@@ -237,7 +241,7 @@ const derive = (v: View, last: number | null, now: number) => {
   }
   const runway = (w: Win): Runway => {
     const r = pace(w)
-    const resetMs = w.resetsAt ? Date.parse(w.resetsAt) - now : SPAN[w.kind] * 1000
+    const resetMs = w.resetsAt ? Date.parse(w.resetsAt) - now : (SPAN[w.kind] ?? 0) * 1000
     if (r <= 0) return { r, text: 'no pace yet', bad: false, leftMs: Infinity }
     const leftMs = ((100 - est(w)) / r) * 3600e3
     return leftMs >= resetMs ? { r, text: 'lasts until reset', bad: false, leftMs } : { r, text: `runs out in ${dur(leftMs)}`, bad: true, leftMs }
@@ -327,10 +331,10 @@ const derive = (v: View, last: number | null, now: number) => {
   // The cheaper path is the one with the lower cost over the next 5 turns.
   const HORIZON_TURNS = 5
   const switchRows = MODELS.filter(k => k !== me).map(k => {
-    const nowOnce = pc(ctxTok * wAt(k, ctxTok)[2])
+    const nowOnce = pc(ctxTok * wAt(k, ctxTok)[2]!)
     const nowTurn = perTurn(k, false)
     // null when the current model is unpriced (its note-writing cost is unknown)
-    const hoOnce = noteU !== null ? pc(noteU + (base + ho.extra) * wAt(k, base + ho.extra)[2]) : null
+    const hoOnce = noteU !== null ? pc(noteU + (base + ho.extra) * wAt(k, base + ho.extra)[2]!) : null
     const hoTurn = perTurn(k, true)
     const nowTotal = nowOnce + HORIZON_TURNS * nowTurn
     const hoTotal = hoOnce !== null ? hoOnce + HORIZON_TURNS * hoTurn : null
@@ -410,7 +414,7 @@ const quant = (a: number[], q: number) => {
   if (a.length === 0) return 0
   const s = [...a].sort((x, y) => x - y)
   const i = (s.length - 1) * q, lo = Math.floor(i), hi = Math.ceil(i)
-  return s[lo] + (s[hi] - s[lo]) * (i - lo)
+  return s[lo]! + (s[hi]! - s[lo]!) * (i - lo)
 }
 // A round axis top: 1, 2, 2.5 or 5 times a power of ten.
 const niceMax = (x: number) => {
@@ -422,7 +426,7 @@ const niceMax = (x: number) => {
 // hex -> OKLCH, the inverse of hexOk (same published matrices)
 const okOf = (hex: string): Ok => {
   const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
-  const [r, g, b] = rgb(hex).map(v => lin(v / 255))
+  const [r = 0, g = 0, b = 0] = rgb(hex).map(v => lin(v / 255))
   const l = Math.cbrt(0.4122214708 * r + 0.5363329551 * g + 0.0514459929 * b)
   const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
   const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
@@ -598,22 +602,22 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     // a model, and its legend entry names it (identity never by colour alone).
     const elsew = keys.map(k => D[k]?.e ?? 0)
     const anyElse = elsew.some(e => e > 0)
-    const tall = totals.map((t, i) => t + elsew[i])
+    const tall = totals.map((t, i) => t + elsew[i]!)
     const max = niceMax(val(Math.max(...tall, 0)) * 1.08)
     const sy = (x: number) => base - (x / max) * (base - top)
     const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
-    let out = `<defs>${present.map(m => gradDef(`d${m}`, MODEL_COL[m], true)).join('')}` +
+    let out = `<defs>${present.map(m => gradDef(`d${m}`, MODEL_COL[m]!, true)).join('')}` +
       `<pattern id="dElse" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
       `<rect width="4" height="4" fill="${SURFACE}"/><line x1="0" y1="0" x2="0" y2="4" stroke="${DIM}" stroke-width="1.5"/></pattern></defs>`
     out += [0, max / 2, max].map(t => gridLine(x0, sy(t), tick(t))).join('')
     let peak = -1, hv = ''
-    tall.forEach((t, i) => { if (t > 0 && (peak < 0 || t > tall[peak])) peak = i })
+    tall.forEach((t, i) => { if (t > 0 && (peak < 0 || t > tall[peak]!)) peak = i })
     keys.forEach((k, i) => {
       const b = D[k]
       const x = x0 + i * sx + gap / 2
       const parts = present.map(m => [m, b?.m[m] ?? 0] as const).filter(p => p[1] > 0)
       let y = base, segs = ''
-      const e = elsew[i]
+      const e = elsew[i]!
       parts.forEach(([m, u], j) => {
         const h = (val(u) / max) * (base - top)
         y -= h
@@ -634,7 +638,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     // day is easy to point at
     for (const [a, z] of hoverSpans(keys.length)) {
       const cx = x0 + ((a + z + 1) / 2) * sx
-      const name = a === z ? longDay(keys[a]) : `${shortDay(keys[a])} to ${shortDay(keys[z])}`
+      const name = a === z ? longDay(keys[a]!) : `${shortDay(keys[a]!)} to ${shortDay(keys[z]!)}`
       const sum = totals.slice(a, z + 1).reduce((p, q) => p + q, 0)
       const parts = present.map(m => [m, keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.m[m] ?? 0), 0)] as const).filter(q => q[1] > 0)
       const calls = keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.n ?? 0), 0)
@@ -644,14 +648,14 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       // measured", never a quiet zero.  A day that caught use from while no
       // session was open says since when (scan.py "es").
       const unmeasured = keys.slice(a, z + 1).filter(k => !((D[k]?.s ?? 0) > 0)).length
-      const since = a === z && D[keys[a]]?.es ? ` since ${new Date(D[keys[a]]!.es! * 1000).toLocaleDateString('en-US', { weekday: 'short' })}` : ''
+      const since = a === z && D[keys[a]!]?.es ? ` since ${new Date(D[keys[a]!]!.es! * 1000).toLocaleDateString('en-US', { weekday: 'short' })}` : ''
       const elseLine = [...(es > 0 ? [`Elsewhere ${valTxt(es)}${since}`] : []),
         ...(unmeasured === z - a + 1 ? ['Elsewhere not measured'] : unmeasured > 0 ? [`Elsewhere not measured on ${unmeasured} ${unmeasured === 1 ? 'day' : 'days'}`] : [])]
       hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
         tipBox(cx, top, H, sum + es > 0 ? [name, `${valTxt(sum + es)}${per7 > 0 && sum > 0 ? ` · ${fmt(sum)} units here` : ''}`,
           ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), ...elseLine, `${calls} calls`] : [name, 'No work here', ...elseLine]))
     }
-    if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(tall[peak])) - 4, valTxt(tall[peak]).replace('~', ''), 'middle', INK)
+    if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(tall[peak]!)) - 4, valTxt(tall[peak]!).replace('~', ''), 'middle', INK)
     const every = Math.ceil(keys.length / 5)
     keys.forEach((k, i) => { if ((keys.length - 1 - i) % every === 0) out += label(x0 + i * sx + sx / 2, H - 2, shortDay(k), 'middle') })
     out += hv
@@ -660,7 +664,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     daily = {
       svg: svgDoc(H, out), alt: `Daily work over ${range} days, ${valTxt(sum)} in all${esum > 0 ? `, plus ${valTxt(esum)} elsewhere` : ''}`,
       right: unit === '% of 7D' ? '% of 7D per day' : 'work units per day',
-      legend: [...present.map(m => ({ name: cap(m), col: MODEL_COL[m] })), ...(anyElse ? [{ name: 'Elsewhere', col: DIM, glyph: '▨' }] : [])],
+      legend: [...present.map(m => ({ name: cap(m), col: MODEL_COL[m]! })), ...(anyElse ? [{ name: 'Elsewhere', col: DIM, glyph: '▨' }] : [])],
     }
     text.push(`Daily (${range}D): ${keys.slice(-7).map(k => `${shortDay(k)} ${valTxt(dayTotal(D[k]))}`).join(' · ')}`)
     const e7 = elsew.slice(-7).reduce((a, b) => a + b, 0)
@@ -686,15 +690,15 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     if (past.length >= 3) {
       const cols = grid.map(m => past.map(([ra, ss]) => at(ss, startOf(ra), m)))
       p25 = cols.map(c => quant(c, 0.25)); p50 = cols.map(c => quant(c, 0.5)); p75 = cols.map(c => quant(c, 0.75))
-      out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p75[i])}`).join(' L')} L${[...grid].reverse().map((m, i) => `${sx(m)},${sy(p25[grid.length - 1 - i])}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
-      out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p50[i])}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
+      out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p75[i]!)}`).join(' L')} L${[...grid].reverse().map((m, i) => `${sx(m)},${sy(p25[grid.length - 1 - i]!)}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
+      out += `<path d="M${grid.map((m, i) => `${sx(m)},${sy(p50[i]!)}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
     }
-    const cur = (byWin.get(w5.resetsAt) ?? []).map(s => [(s.at - startOf(w5.resetsAt)) / 60, s.pct] as [number, number])
+    const cur = (byWin.get(w5.resetsAt) ?? []).map(s => [(s.at - startOf(w5.resetsAt!)) / 60, s.pct] as [number, number])
       .filter(([m]) => m >= 0 && m <= nowMin).sort((a, b) => a[0] - b[0])
     const pts: [number, number][] = [[0, 0], ...cur, [nowMin, pctNow]]
     // each reading holds until the next one: a step line
     let path = `M${sx(0)},${sy(0)}`
-    for (let i = 1; i < pts.length; i++) path += ` L${sx(pts[i][0])},${sy(pts[i - 1][1])} L${sx(pts[i][0])},${sy(pts[i][1])}`
+    for (let i = 1; i < pts.length; i++) path += ` L${sx(pts[i]![0])},${sy(pts[i - 1]![1])} L${sx(pts[i]![0])},${sy(pts[i]![1])}`
     out += `<defs>${gradDef('pl', ME, false)}</defs><path d="${path}" fill="none" stroke="url(#pl)" stroke-width="2" stroke-linejoin="round"/>`
     const rw = d.runway(w5)
     if (rw.r > 0 && nowMin < 300) {
@@ -717,7 +721,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           lines.push(`This window ${Math.round(p)}%`)
           mk += ring(x, sy(p), ME)
         } else if (rw.r > 0) lines.push(`Projected ${Math.round(Math.min(100, pctNow + (rw.r * (m - nowMin)) / 60))}%`)
-        if (p50.length) lines.push(`Usual ${Math.round(p50[i])}%`, `Middle half ${Math.round(p25[i])} to ${Math.round(p75[i])}%`)
+        if (p50.length) lines.push(`Usual ${Math.round(p50[i]!)}%`, `Middle half ${Math.round(p25[i]!)} to ${Math.round(p75[i]!)}%`)
         out += hover(hitRect(x - cw / 2, top, cw, base - top), mk, tipBox(x, top, H, lines))
       })
     }
@@ -757,20 +761,20 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     if (full.length >= 3) {
       const cols = grid.map(dd => full.map(([ra, ss]) => at(ss, startOf(ra), dd)))
       p25 = cols.map(c => quant(c, 0.25)); p50 = cols.map(c => quant(c, 0.5)); p75 = cols.map(c => quant(c, 0.75))
-      out += `<path d="M${grid.map((dd, i) => `${sx(dd)},${sy(p75[i])}`).join(' L')} L${[...grid].reverse().map((dd, i) => `${sx(dd)},${sy(p25[grid.length - 1 - i])}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
-      out += `<path d="M${grid.map((dd, i) => `${sx(dd)},${sy(p50[i])}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
+      out += `<path d="M${grid.map((dd, i) => `${sx(dd)},${sy(p75[i]!)}`).join(' L')} L${[...grid].reverse().map((dd, i) => `${sx(dd)},${sy(p25[grid.length - 1 - i]!)}`).join(' L')} Z" fill="${HIST}" opacity="0.35"/>`
+      out += `<path d="M${grid.map((dd, i) => `${sx(dd)},${sy(p50[i]!)}`).join(' L')}" fill="none" stroke="${HIST}" stroke-width="2"/>`
     }
     out += `<line x1="${sx(0)}" y1="${sy(0)}" x2="${sx(7)}" y2="${sy(100)}" stroke="${DIM}" stroke-dasharray="4 4"/>`
     // each reading holds until the next one: a step line
     const steps = (pts: [number, number][]) => {
-      let path = `M${sx(pts[0][0])},${sy(pts[0][1])}`
-      for (let i = 1; i < pts.length; i++) path += ` L${sx(pts[i][0])},${sy(pts[i - 1][1])} L${sx(pts[i][0])},${sy(pts[i][1])}`
+      let path = `M${sx(pts[0]![0])},${sy(pts[0]![1])}`
+      for (let i = 1; i < pts.length; i++) path += ` L${sx(pts[i]![0])},${sy(pts[i - 1]![1])} L${sx(pts[i]![0])},${sy(pts[i]![1])}`
       return path
     }
     const lastWk = past[past.length - 1]
     const lastPts = lastWk ? lastWk[1].map(s => [(s.at - startOf(lastWk[0])) / DAY, s.pct] as [number, number]).filter(([dd]) => dd >= 0 && dd <= 7).sort((a, b) => a[0] - b[0]) : []
     const showLast = !p50.length && lastPts.length >= 2
-    if (showLast) out += `<path d="${steps([...lastPts, [7, lastPts[lastPts.length - 1][1]]])}" fill="none" stroke="${HIST}" stroke-width="2" stroke-linejoin="round"/>`
+    if (showLast) out += `<path d="${steps([...lastPts, [7, lastPts[lastPts.length - 1]![1]]])}" fill="none" stroke="${HIST}" stroke-width="2" stroke-linejoin="round"/>`
     const ss7 = byWin.get(w7.resetsAt) ?? []
     const cur = ss7.map(s => [(s.at - st) / DAY, s.pct] as [number, number]).filter(([dd]) => dd >= 0 && dd <= nowD).sort((a, b) => a[0] - b[0])
     out += `<defs>${gradDef('p7', ME, false)}</defs><path d="${steps([[0, 0], ...cur, [nowD, pctNow]])}" fill="none" stroke="url(#p7)" stroke-width="2" stroke-linejoin="round"/>`
@@ -795,10 +799,10 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         mk += ring(x, sy(p), ME)
       } else if (rw.r > 0) lines.push(`Projected ${Math.round(Math.min(100, pctNow + rw.r * (dd - nowD) * 24))}%`)
       lines.push(`Even pace ${Math.round((dd / 7) * 100)}%`)
-      if (p50.length) lines.push(`Usual ${Math.round(p50[i])}%`, `Middle half ${Math.round(p25[i])} to ${Math.round(p75[i])}%`)
+      if (p50.length) lines.push(`Usual ${Math.round(p50[i]!)}%`, `Middle half ${Math.round(p25[i]!)} to ${Math.round(p75[i]!)}%`)
       else if (showLast) {
         const lp = lastPts.filter(q => q[0] <= dd)
-        lines.push(lp.length ? `Last week ${Math.round(lp[lp.length - 1][1])}%` : 'Last week: no reading yet')
+        lines.push(lp.length ? `Last week ${Math.round(lp[lp.length - 1]![1])}%` : 'Last week: no reading yet')
       }
       out += hover(hitRect(x - cw / 2, top, cw, base - top), mk, tipBox(x, top, H, lines))
     })
@@ -882,12 +886,12 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   {
     const bt = v.byTime
     if (bt && bt.per1 > 0 && bt.grid?.some(r => r.some(Boolean))) {
-      const blocks = bt.grid[0].length, bh = 24 / blocks
+      const blocks = bt.grid[0]!.length, bh = 24 / blocks
       const x0 = 32, cell = (HW - x0) / blocks, ch = 13, H = 7 * (ch + 2) + 14
       let out = '', hv = ''
       bt.grid.forEach((row, r) => {
         const y = r * (ch + 2)
-        out += label(x0 - 6, y + 10, WEEK[r], 'end')
+        out += label(x0 - 6, y + 10, WEEK[r]!, 'end')
         row.forEach((c, b) => {
           const x = x0 + b * cell + 1, w = cell - 2
           if (!c) { out += `<rect x="${x}" y="${y}" width="${w}" height="${ch}" rx="2" fill="${EMPTY}"/>`; return }
@@ -932,7 +936,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const rows = rest > 0 ? [...topN, ['Other', rest] as [string, number]] : topN
       const rowH = 22, H = rows.length * rowH, lx = 126
       const max = Math.max(...rows.map(r => r[1]))
-      let out = `<defs>${gradDef('pj', ME, false)}${gradDef('po', MODEL_COL.other, false)}</defs>`, hv = ''
+      let out = `<defs>${gradDef('pj', ME, false)}${gradDef('po', MODEL_COL.other!, false)}</defs>`, hv = ''
       const sum = all.reduce((a, b) => a + b[1], 0)
       rows.forEach(([name, u], i) => {
         const y = i * rowH + 4, w = Math.max(2, (u / max) * (HW - lx - 52))
@@ -958,7 +962,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const b = D[k]
       if (!b) continue
       const wd = (dayOfKey(k).getDay() + 6) % 7 // Monday first
-      b.h.forEach((u, h) => { M[wd][h] += u })
+      b.h.forEach((u, h) => { M[wd]![h] = M[wd]![h]! + u })
     }
     const max = Math.max(...M.flat())
     if (max > 0) {
@@ -966,7 +970,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       let out = '', hv = ''
       const all = M.flat().reduce((a, b) => a + b, 0)
       M.forEach((row, r) => {
-        out += label(x0 - 6, r * (ch + 2) + 10, WEEK[r], 'end')
+        out += label(x0 - 6, r * (ch + 2) + 10, WEEK[r]!, 'end')
         row.forEach((u, h) => {
           const t = u / max, x = x0 + h * cell + 1, y = r * (ch + 2)
           out += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${ch}" rx="2" fill="${t < 0.02 ? EMPTY : ME}" fill-opacity="${t < 0.02 ? 1 : (0.18 + t * 0.82).toFixed(2)}"/>`
@@ -992,7 +996,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     let out = `<defs>${gradDef('rn', ME, true)}</defs>` + [0, max / 2, max].map(t => gridLine(x0, base - sy(t), tick(t))).join(''), hv = ''
     for (const [a, z] of hoverSpans(keys.length)) {
       const cx = x0 + ((a + z + 1) / 2) * sx
-      const name = a === z ? longDay(keys[a]) : `${shortDay(keys[a])} to ${shortDay(keys[z])}`
+      const name = a === z ? longDay(keys[a]!) : `${shortDay(keys[a]!)} to ${shortDay(keys[z]!)}`
       const t = totals.slice(a, z + 1).reduce((p, q) => p + q, 0)
       const r = keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.r ?? 0), 0)
       hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
@@ -1001,12 +1005,12 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           : [name, 'No work']))
     }
     keys.forEach((k, i) => {
-      const b = D[k], t = totals[i]
+      const b = D[k], t = totals[i]!
       if (!b || t <= 0) return
       const hh = sy(val(b.r)), nh = sy(val(t - b.r)), x = x0 + i * sx + gap / 2
       out += `<rect x="${x}" y="${base - hh}" width="${bw}" height="${hh}" fill="${HIST}"/>` + upBar(x, base - hh - nh, bw, Math.max(0.5, nh - 1), 'url(#rn)')
     })
-    out += label(x0 + 2, H - 2, shortDay(keys[0])) + label(HW, H - 2, 'Today', 'end') + hv
+    out += label(x0 + 2, H - 2, shortDay(keys[0]!)) + label(HW, H - 2, 'Today', 'end') + hv
     const R = keys.reduce((a, k) => a + (D[k]?.r ?? 0), 0), T = totals.reduce((a, b) => a + b, 0)
     if (T > 0) {
       reread = {
@@ -1198,6 +1202,8 @@ export const register: Register = on => {
   let py: string[] | undefined
   let alerts: AlertState | undefined
   let backfilling = false  // the one-time history backfill is running
+  let storeFull = false    // a store write was refused even after pruning
+  let wallSent = ''        // the 5H window this session already sent the runs-out alert for
   let bfRetryAt = 0        // ms: another session was on it (busy); look again after this
   // Scans and store writes wait for the first draw of the band or a pane, or
   // for /manapool: headless runs (claude -p, agent and workflow sessions)
@@ -1280,19 +1286,22 @@ export const register: Register = on => {
       }
       if (alerts.prev[name] !== p.lvl) { alerts.prev[name] = p.lvl; changed = true }
     }
-    if (changed) await io.set(`alerts:${sid}`, alerts)
+    if (changed) await save(io, `alerts:${sid}`, alerts, now)
 
     const w5 = d.w5
     if (w5 && w5.resetsAt) {
       const rw = d.runway(w5)
       if (rw.bad && rw.leftMs <= WALL_MS) {
         const done = await io.get('wall5h').catch(() => null)
-        if (done !== w5.resetsAt) {
-          await io.set('wall5h', w5.resetsAt) // claim it first, so other sessions stay quiet
+        // wallSent: once here even when the store refuses the claim below,
+        // or a full store would re-send the alert on every refresh
+        if (done !== w5.resetsAt && wallSent !== w5.resetsAt) {
+          wallSent = w5.resetsAt
+          await save(io, 'wall5h', w5.resetsAt, now) // claim it first, so other sessions stay quiet
           const text = `5H runs out in ~${dur(rw.leftMs)} at this pace (resets ${clock(Date.parse(w5.resetsAt))}).`
           io.toast(text)
           const how = await wallNotify(io, text)
-          await io.set('wall5hHow', { at: now, how })
+          await save(io, 'wall5hHow', { at: now, how }, now)
         }
       }
     }
@@ -1315,13 +1324,20 @@ export const register: Register = on => {
       if (sid) keep.add(sid)
       for (const k of keys) {
         const m = /^(ses|alerts):(.+)$/.exec(k)
-        if (m && !keep.has(m[2])) await io.del(k)
+        if (m && !keep.has(m[2]!)) await io.del(k)
       }
     } catch { /* pruning is best effort */ }
   }
   // A store write that is refused (store full) prunes and tries once more.
-  const save = async (io: IO, k: string, val: unknown, nowMs: number) => {
-    try { await io.set(k, val) } catch { await prune(io, nowMs); await io.set(k, val) }
+  // Refused again, it gives up quietly and says so (false), so a full store
+  // never fails the whole refresh: the band still draws from this scan, and
+  // what was not kept comes back (the ledger is rebuilt from transcripts,
+  // the rest is rewritten on the next refresh).  `storeFull` puts a note on
+  // the band until a write goes through again.
+  const save = async (io: IO, k: string, val: unknown, nowMs: number): Promise<boolean> => {
+    try { await io.set(k, val); return true } catch { /* full: prune, then once more */ }
+    await prune(io, nowMs)
+    try { await io.set(k, val); storeFull = false; return true } catch { storeFull = true; return false }
   }
 
   // Reads local files and runs a script: zero tokens, no model call.
@@ -1359,7 +1375,7 @@ export const register: Register = on => {
         await io.show(v => ({ ...(v ?? { samples: [], updatedAt: now }), wins: [], updatedAt: now, ctx, model, refreshing: false, error: 'No limit data yet (needs a subscription session with a reply sent).' } as View))
         return
       }
-      const starts = limits.map(r => (r.resetsAt ? Math.floor(Date.parse(r.resetsAt) / 1000) - SPAN[r.kind] : now - SPAN[r.kind]))
+      const starts = limits.map(r => (r.resetsAt ? Math.floor(Date.parse(r.resetsAt) / 1000) - (SPAN[r.kind] ?? 0) : now - (SPAN[r.kind] ?? 0)))
       const i5 = limits.findIndex(r => r.kind === 'five_hour')
       // The tick log ("at X% the window held Y units", shared by every open
       // session) lives in a file that scan.py changes only under a file lock,
@@ -1432,6 +1448,8 @@ export const register: Register = on => {
       await save(io, 'last', { ...nv, samples: curSamples, session: undefined }, nowMs)
       if (sid) await save(io, `ses:${sid}`, { session: nv.session, at: now }, nowMs)
       await runAlerts(io, nv, nowMs)
+      // The band is up to date, but not everything was kept (see save).
+      if (storeFull) await io.show(v => (v ? { ...v, error: 'Mana Pool storage is full. Some numbers were not saved.' } : v))
       // Older days of the History pane: read every transcript once, in the
       // background (a few seconds), then refresh to show them.
       // One at a time across sessions, with a growing wait after a failure:
@@ -1495,8 +1513,8 @@ export const register: Register = on => {
       keys: () => $.store.keys(),
       del: k => $.store.delete(k),
       id: () => $.session.id(),
-      show: fn => update($, view, fn as any),
-      hist: fn => update($, histAtom, fn as any),
+      show: fn => update($, view, fn as any).then(() => undefined),
+      hist: fn => update($, histAtom, fn as any).then(() => undefined),
       toast: text => $.ui.toast(`Mana Pool · ${text}`, { timeoutMs: 8000 }),
       notify: text => $.ui.notify(text, { title: 'Mana Pool' }),
       // macOS's own notification; the text is ours (numbers and fixed words), quotes stripped anyway
@@ -1953,7 +1971,7 @@ export const register: Register = on => {
             const rightOpts = rw.bad
               ? [`${rw.text} · resets in ${resetTxt}`, `${rw.text} · resets ${resetTxt}`, rw.text]
               : [`resets in ${resetTxt}`, `resets ${resetTxt}`]
-            const showPace = !!paceS && leftW + tw(paceS) + 1 + tw(rightOpts[0]) <= MW
+            const showPace = !!paceS && leftW + tw(paceS) + 1 + tw(rightOpts[0]!) <= MW
             const rightTxt = rightOpts.find(t => leftW + 1 + tw(t) <= MW) ?? rightOpts[rightOpts.length - 1]
             // Desktop and phone: the whole line sits inside the bar (as in Mini),
             // which saves a row.  It shortens to fit: pace goes first, then
@@ -2126,7 +2144,7 @@ export const register: Register = on => {
     // Each chart is given its exact size, so none is centred or rescaled.
     const dims = (svg: string) => {
       const m = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)
-      return m ? { width: +m[1], height: +m[2] } : {}
+      return m ? { width: +m[1]!, height: +m[2]! } : {}
     }
     const pick = (r: HistRange) => (
       <Button key={`range${r}`} label={`${r}D`} {...(r === range ? { variant: 'primary' } : { plain: true, dimColor: true })}

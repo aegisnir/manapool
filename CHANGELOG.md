@@ -2,6 +2,14 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.3 (2026-11-18)
+
+A full store no longer stops the band, and the plugin passes the strict check.
+
+- **A full store no longer fails every refresh.**  The mod's store is capped at 4 MiB.  The alert code wrote straight to it instead of through the write that clears out old sessions and tries again, so once the store was full every refresh failed and the band stopped updating.  Every write now goes through that path, and a write still refused after the clear-out is skipped instead of failing the refresh: the band shows this scan's numbers with the note "Mana Pool storage is full. Some numbers were not saved."  The ledger is rebuilt from transcripts and the rest is written again next time.  The once-per-window "runs out" alert is remembered in the session too, so a refused claim cannot re-send it on every refresh.
+- **`claude plugin validate --strict` passes.**  It counted the 111 "possibly undefined" type warnings in `register.tsx` as errors.  Each lookup now states what it relies on (a list read at an index it has just checked, a window kind that is always there), and two lookups that could have come back empty now fall back: a model with no weights uses Sonnet's list weights, and an unknown window kind has a length of 0.
+- **Band test** for a store that refuses every write.
+
 ## 0.7.2 (2026-11-18)
 
 Fixes from the 0.7.1 review: elsewhere in every band size, one backfill at a time, no scans in sessions that never show the band, a steadier 7D pace, fast mode in forecasts.

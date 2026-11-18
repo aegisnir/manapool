@@ -152,3 +152,41 @@ test('headless: no scan until the band is drawn', async ($, on) => {
   expect(runs.length).toBeGreaterThan(0)
   await ui.unmount()
 })
+
+// A3: a store that refuses every write (full) must not fail the refresh.
+// The band still gets this scan's numbers, with a note that some were not saved.
+test('a full store does not stop the refresh', async ($, on) => {
+  const views: any[] = []
+  on('process.run', (_: unknown, e: any) => {
+    const argv = [...(e.argv ?? [])] as string[]
+    // the Python check, then the scan (which reports nothing much: no work yet)
+    const out = argv.includes('-c') ? '3' : JSON.stringify({ _samples: [], _check: null })
+    return { value: { exitCode: 0, stdout: out, stderr: '' } } as any
+  })
+  on('command.register', () => ({ value: { command: 'manapool' } }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'test-session' }))
+  on('session.usage', () => ({ value: { rateLimits: [{ kind: 'five_hour', percentUsed: 12, resetsAt: iso(NOW + 2 * 3600e3) }] } }) as any)
+  on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+  on('fs.read', () => ({ value: '{"version":"0.0.0"}' }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ deny: 'store full' }) as any)  // refused, as a full store refuses
+  on('store.keys', () => ({ value: [] }))
+  on('store.delete', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: Date.now() }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('clock.every', () => ({ value: undefined }))
+  on('state.set', (_: unknown, e: any) => {
+    if (e.key === 'view') views.push(e.value?.value)
+    return { value: { isSet: true, version: 2 } }
+  })
+  seed(on, viewOf(12, 30))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true } as any)
+  await wait(400)
+  // (the seeded state.get keeps answering the seeded view, so each write is
+  // looked at on its own: the scan's view, then the note)
+  const written = views.filter(Boolean)
+  expect(written.some(v => v.wins?.length === 1 && !v.error)).toBe(true)
+  expect(written.some(v => /storage is full/.test(String(v.error)))).toBe(true)
+  expect(written.some(v => /Error/.test(String(v.error)))).toBe(false)
+})
