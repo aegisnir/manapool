@@ -2,6 +2,17 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## Unreleased
+
+- **Runenir colours.**  Mana Pool now uses the hues of Runenir, the -nir UI library, at exactly the lightness and saturation it had before, so nothing is brighter or louder.  Greys take a faint violet cast, and the accent, blue and red are Runenir's.  Backgrounds, green, amber, the cache orange and model colours are unchanged.
+- **Pills follow Runenir's badge rule:** the level sits in the pill's tint and a 35% edge, and the words are main text.  Red pill words go from APCA Lc 43 to 89.  In Mini the dotted (amber) and dashed (red) edges stay.
+- **Nothing is pushed off the band's edge.**  In Mini, a limit that would run out turns from a bar into a ring with its percent and "out in" beside it, so the warning takes about the bar's own room and Cache stays.  If the line is still too wide, Cache, then Last turn, then the 7D bar drop.  In Full the two meters share the band's width (stacked under 52 columns), and rows truncate instead of wrapping or pushing their pill out.
+- **Full is two rows shorter, with nothing dropped.**  Each meter's line (percent, pace, reset, runway) sits inside its bar, as in Mini, and Next turn joins the Last turn line as "next".
+- **Limit size in colour.**  Each window's dot is violet above the median (a bigger limit) and coral below (a smaller one), full colour at 20% off, as in Limit by time.  The median's value moved to the legend, where the dots no longer cover it.
+- **History range buttons respond again.**  The desktop app can lose a redraw of the History pane (about 200k characters of charts) when a second redraw lands while it is still drawing, leaving the old drawing up with dead buttons; reopening the pane then drew nothing.  The pane read the band's live numbers, which change every 30 seconds and several times per refresh, so a range press often collided with a background redraw.  History now keeps its own copy, updated at most every 5 minutes (sooner on first draw and when older days finish loading), so it redraws almost only when pressed.  The refresh spinner also has its own value that only the band reads.
+- **90D draws.**  Past roughly 250k characters of charts the desktop app stops redrawing the pane, and 90D was about 300k.  At 90 days, Daily and Re-reading now show one tooltip per week (a bar is about 4 px wide there), and the hover marks share one set of styles, so 90D is about 215k and stays under 235k with a full 90 days of data.
+- **Terminal bars.**  The terminal now draws its block bars and the meters' text line; it had been handed a drawing element it cannot show, so the bars were blank there.
+
 ## 0.6.0 (2026-11-14)
 
 More History charts, and hover everywhere.

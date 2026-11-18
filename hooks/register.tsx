@@ -6,12 +6,25 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-09.13' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-17.8' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
 const busyAtom = atom({ plugin: 'manapool', key: 'busy' } as const, false, { shape: 'busy-3' })
 const rangeAtom = atom({ plugin: 'manapool', key: 'range' } as const, 30, { shape: 'range-1' })
+// The spinner's frame, kept apart from `view`: it ticks about 6 times a second
+// during a refresh, and only the band draws it.  Inside `view` it made the
+// History pane (which reads `view`) redraw every chart on every tick.
+const spinAtom = atom({ plugin: 'manapool', key: 'spin' } as const, 0, { shape: 'spin-1' })
+// The History pane's own copy of the numbers.  The desktop app can lose a
+// redraw of a pane this heavy (about 200k characters of charts) when another
+// redraw lands while it is still drawing: the old drawing stays up with dead
+// buttons.  `view` changes every 30 s and several times per refresh, so the
+// pane reading it redrew constantly and a range press often collided.  This
+// copy changes at most every 5 minutes (sooner for the first draw and when the
+// older days finish loading), so the pane redraws almost only when pressed.
+const histAtom = atom({ plugin: 'manapool', key: 'hist' } as const, null, { shape: 'hist-1' })
+const HIST_EVERY_MS = 5 * 60 * 1000
 // The History pane's id.
 const HPANE = `${PANE}-history`
 
@@ -78,7 +91,7 @@ const median = (a: number[]) => {
 // colour runs red -> amber -> green by how much is LEFT.  Colours in OKLCH.
 // ---------------------------------------------------------------------------
 type Ok = [number, number, number]
-const ERROR: Ok = [0.711, 0.166, 22.2]
+const ERROR: Ok = [0.711, 0.166, 17.9] // Runenir's red hue
 const WARNING: Ok = [0.837, 0.164, 84.4]
 const SUCCESS: Ok = [0.773, 0.153, 163.2]
 const mixOk = (a: Ok, b: Ok, t: number): Ok => {
@@ -111,12 +124,20 @@ const mix = (a: string, b: string, t: number) => {
   return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('')
 }
 const SURFACE = '#262626'
-const RED = '#f87171'
-const ME = '#a98bf5'      // your current model, and "new work" in the turn strip
-const HIST = '#6b6b6b'    // "re-reading history" in the turn strip
-const DIM = '#9a9a9a'     // caption grey (5.4:1 contrast on the band)
-// Pill levels: 0 green, 1 blue (an opportunity), 2 amber, 3 red.
-const LVL = ['#35d399', '#7fb2ff', '#fbbf25', '#f87171']
+// Colours: Runenir's hues (the shared -nir UI library) at the lightness and
+// saturation Mana Pool always used, so nothing got brighter or louder.  Greys
+// carry Runenir's faint violet cast; the accent, blue and red are Runenir's.
+const RED = '#f8707a'
+const ME = '#a38df8'      // your current model, and "new work" in the turn strip
+const HIST = '#6c6a72'    // "re-reading history" in the turn strip
+const DIM = '#9b99a1'     // caption grey
+// Pill levels: 0 green, 1 blue (an opportunity), 2 amber, 3 red.  Pills follow
+// Runenir's badge rule: the level sits in the pill's tint and edge, and the
+// words are main text (APCA Lc 87 to 89, where coloured words were 43 to 66).
+const LVL = ['#35d399', '#79b4fe', '#fbbf25', '#f8707a']
+const COLD = '#79b4fe'    // the prompt cache has expired
+const WARM = '#f6b26b'    // the prompt cache is active
+const SEP = '#48464d'     // the hairline between band sections
 
 // ---------------------------------------------------------------------------
 // The numbers behind every row, worked out once from the saved view so the
@@ -327,14 +348,14 @@ const MODEL_COL: Record<string, string> = {
   opus: '#8d7cd5', sonnet: '#a8ceff', fable: '#eac75e', mythos: '#d17746', haiku: '#16b09b', other: '#5f5f5f',
 }
 const MODEL_ORDER = ['opus', 'sonnet', 'fable', 'mythos', 'haiku', 'other'] // bottom of a stack first
-const GRID = '#3a3a3a'
-const INK = '#ececec'
-const EMPTY = '#2f2f2f'   // a heatmap cell with no work
+const GRID = '#3b3940'
+const INK = '#edebf4'
+const EMPTY = '#2f2e35'   // a heatmap cell with no work
 // Limit by time: a smaller limit than usual.  With ME (a bigger one) it is the
 // diverging pair: OKLab dE 23 to 25 under normal, deutan and protan vision;
 // 6.2:1 contrast on the card.
 const CORAL = '#f08a5d'
-const TIP_BG = '#353535', TIP_LINE = '#4d4d4d' // a tooltip box, one step above the card
+const TIP_BG = '#36343b', TIP_LINE = '#4e4c53' // a tooltip box, one step above the card
 // Chart width inside its card.  Set by historyView from the pane's width, so
 // every chart is drawn at its real size (crisp labels, aligned edges).
 let HW = 408
@@ -384,11 +405,17 @@ const gradDef = (id: string, hex: string, vertical: boolean) => {
 // that are hidden until the pointer is over that area.  The tooltip ignores
 // the pointer, so it never steals the hover from the area under it.  Hover
 // groups go after every visible mark, so a tooltip is drawn on top.
-const HOVER_CSS = '<style>.h .hv{opacity:0}.h:hover .hv{opacity:1}.hv{pointer-events:none}</style>'
-// Numbers are cut to two decimals (attribute values only, never text): a
+// The tooltip's colours and the hover marks' strokes live here once, as
+// classes, instead of on every target: a chart with a hover target per cell
+// repeats them hundreds of times, and the desktop app stops redrawing the
+// History pane once all its charts together pass roughly 250k characters.
+// Every class is used only inside a hover group, which is hidden by attribute
+// too, so a surface that drops this block shows nothing wrong.
+const HOVER_CSS = `<style>.h .hv{opacity:0}.h:hover .hv{opacity:1}.hv{pointer-events:none}.b{fill:${TIP_BG};stroke:${TIP_LINE}}.i{fill:${INK};font-weight:600}.d{fill:${DIM}}.x{stroke:${INK};stroke-opacity:.55;stroke-dasharray:2 2}.o{fill:none;stroke:${INK};stroke-width:1.5}</style>`
+// Numbers are cut to one decimal (attribute values only, never text): a
 // chart with a hover target per cell runs close to the 131,072-character
-// limit an Svg may have, and 188.91666666666669 says no more than 188.91.
-const trim = (body: string) => body.replace(/="([^"]*)"/g, (_m, v: string) => `="${v.replace(/(\d\.\d\d)\d+/g, '$1')}"`)
+// limit an Svg may have, and a tenth of a pixel is finer than any screen.
+const trim = (body: string) => body.replace(/="([^"]*)"/g, (_m, v: string) => `="${v.replace(/(\d\.\d)\d+/g, '$1')}"`)
 const svgDoc = (h: number, body: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${HW + 16} ${h + 16}" width="${HW + 16}" height="${h + 16}">${HOVER_CSS}` +
   `<rect width="${HW + 16}" height="${h + 16}" rx="10" fill="${SURFACE}"/><g transform="translate(8 8)" ${FONT} font-size="10">${trim(body)}</g></svg>`
@@ -404,8 +431,9 @@ const tipBox = (x: number, y: number, h: number, lines: string[]) => {
   if (tx + w > HW) tx = x - 10 - w
   tx = Math.max(-6, tx)
   const ty = Math.max(-6, Math.min(y, h - th + 6))
-  return `<rect x="${tx}" y="${ty}" width="${w}" height="${th}" rx="5" fill="${TIP_BG}" stroke="${TIP_LINE}"/>` +
-    lines.map((l, i) => `<text x="${tx + 8}" y="${ty + 15 + i * 13}" fill="${i ? DIM : INK}"${i ? '' : ' font-weight="600"'}>${esc(l)}</text>`).join('')
+  // One text element, a line per tspan; colours come from the classes in HOVER_CSS.
+  return `<rect x="${tx}" y="${ty}" width="${w}" height="${th}" rx="5" class="b"/><text x="${tx + 8}" y="${ty + 15}">` +
+    lines.map((l, i) => `<tspan${i ? ` x="${tx + 8}" dy="13"` : ''} class="${i ? 'd' : 'i'}">${esc(l)}</tspan>`).join('') + `</text>`
 }
 // One hover group: `hit` is the invisible area, `marks` (crosshair, ring,
 // outline) and `tip` show while the pointer is over it.  The hidden state is
@@ -416,8 +444,18 @@ const hover = (hit: string, marks: string, tip: string) => `<g class="h">${hit}<
 const hitRect = (x: number, y: number, w: number, h: number) =>
   `<rect x="${x}" y="${y}" width="${Math.max(1, w)}" height="${Math.max(1, h)}" fill="transparent"/>`
 const crossX = (x: number, y0: number, y1: number) =>
-  `<line x1="${x}" x2="${x}" y1="${y0}" y2="${y1}" stroke="${INK}" stroke-opacity="0.55" stroke-dasharray="2 2"/>`
-const ring = (x: number, y: number, col = INK) => `<circle cx="${x}" cy="${y}" r="5.5" fill="none" stroke="${col}" stroke-width="1.5"/>`
+  `<line x1="${x}" x2="${x}" y1="${y0}" y2="${y1}" class="x"/>`
+const ring = (x: number, y: number, col = INK) =>
+  col === INK ? `<circle cx="${x}" cy="${y}" r="5.5" class="o"/>` : `<circle cx="${x}" cy="${y}" r="5.5" fill="none" stroke="${col}" stroke-width="1.5"/>`
+// Hover targets for a run of n daily bars, as [first, last] index pairs:
+// one per day, or one per week (counted back from today) past 45 days.  At
+// 90 days a bar is about 4 px wide, too thin to aim at, and a tooltip per
+// day doubles the chart's size (see HOVER_CSS).
+const hoverSpans = (n: number) => {
+  const size = n > 45 ? 7 : 1, out: [number, number][] = []
+  for (let e = n - 1; e >= 0; e -= size) out.unshift([Math.max(0, e - size + 1), e])
+  return out
+}
 // A moment for a tooltip: "Sat, Nov 14, 11:00 AM EST" (the computer's own time zone).
 const stamp = (ms: number) =>
   new Date(ms).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
@@ -437,7 +475,7 @@ const rightBar = (x: number, y: number, w: number, h: number, fill: string) => {
 }
 
 type HistRange = 7 | 30 | 90
-type Chart = { svg: string; alt: string; right?: string; rightBad?: boolean; legend?: { name: string; col: string }[]; note?: string }
+type Chart = { svg: string; alt: string; right?: string; rightBad?: boolean; legend?: { name: string; col: string; glyph?: string }[]; note?: string }
 type HistView = {
   ok: boolean; full: boolean; unit: string
   tiles: { svg: string; alt: string } | null
@@ -531,12 +569,19 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           : `<rect x="${x}" y="${y + 1}" width="${bw}" height="${Math.max(0.5, h - 1)}" fill="url(#d${m})"/>`
       })
       out += segs
-      // hover: the whole column, so a thin or empty day is easy to point at
-      const cx = x0 + i * sx + sx / 2
-      hv += hover(hitRect(x0 + i * sx, top, sx, base - top), crossX(cx, top, base),
-        tipBox(cx, top, H, totals[i] > 0 ? [longDay(k), `${valTxt(totals[i])}${per7 > 0 ? ` · ${fmt(totals[i])} units` : ''}`,
-          ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), `${b?.n ?? 0} calls`] : [longDay(k), 'No work']))
     })
+    // hover: the whole column (or week, see hoverSpans), so a thin or empty
+    // day is easy to point at
+    for (const [a, z] of hoverSpans(keys.length)) {
+      const cx = x0 + ((a + z + 1) / 2) * sx
+      const name = a === z ? longDay(keys[a]) : `${shortDay(keys[a])} to ${shortDay(keys[z])}`
+      const sum = totals.slice(a, z + 1).reduce((p, q) => p + q, 0)
+      const parts = present.map(m => [m, keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.m[m] ?? 0), 0)] as const).filter(q => q[1] > 0)
+      const calls = keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.n ?? 0), 0)
+      hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
+        tipBox(cx, top, H, sum > 0 ? [name, `${valTxt(sum)}${per7 > 0 ? ` · ${fmt(sum)} units` : ''}`,
+          ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), `${calls} calls`] : [name, 'No work']))
+    }
     if (peak >= 0) out += label(x0 + peak * sx + sx / 2, sy(val(totals[peak])) - 4, valTxt(totals[peak]).replace('~', ''), 'middle', INK)
     const every = Math.ceil(keys.length / 5)
     keys.forEach((k, i) => { if ((keys.length - 1 - i) % every === 0) out += label(x0 + i * sx + sx / 2, H - 2, shortDay(k), 'middle') })
@@ -710,11 +755,16 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const conf = rows.filter(sure).map(r => r.per1 as number)
       const med = conf.length ? median(conf) : 0
       let out = [0, max / 2, max].map(t => gridLine(x0, sy(t), t ? fmt(t) : '0')).join('')
-      if (med) out += `<line x1="${x0}" x2="${HW}" y1="${sy(med)}" y2="${sy(med)}" stroke="${DIM}" stroke-dasharray="4 4"/>` + label(HW, sy(med) - 4, `median ${fmt(med)}`, 'end')
+      // The median line; its value is in the legend, where no dot covers it.
+      if (med) out += `<line x1="${x0}" x2="${HW}" y1="${sy(med)}" y2="${sy(med)}" stroke="${DIM}" stroke-dasharray="4 4"/>`
       out += `<path d="M${rows.map((r, i) => `${sx(i)},${sy(r.per1 as number)}`).join(' L')}" fill="none" stroke="${GRID}" stroke-width="2"/>`
+      // Each dot against the median: violet a bigger limit, coral a smaller
+      // one, grey near it, full colour at 20% off (the rule Limit by time uses).
       rows.forEach((r, i) => {
         const s = sure(r)
-        out += `<circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="4" fill="${s ? INK : SURFACE}" stroke="${s ? SURFACE : DIM}" stroke-width="${s ? 2 : 1.5}"/>`
+        const off = med ? ((r.per1 as number) - med) / med : 0
+        const c = mix(DIM, off >= 0 ? ME : CORAL, Math.min(1, Math.abs(off) / 0.2))
+        out += `<circle cx="${sx(i)}" cy="${sy(r.per1 as number)}" r="4" fill="${s ? c : SURFACE}" stroke="${s ? SURFACE : c}" stroke-width="${s ? 2 : 1.5}"/>`
       })
       // a date under the first window of each day, a tick mark on every new
       // day; a label is skipped where it would run into the one before
@@ -743,7 +793,8 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       limit = {
         svg: svgDoc(H, out), alt: `Work per 1% of 5H over ${rows.length} finished windows${med ? `, median ${fmt(med)}` : ''}`,
         right, rightBad: right.startsWith('Down'),
-        legend: [{ name: 'Work per 1% of 5H', col: INK }, { name: 'Hollow: under 15% used', col: DIM }],
+        legend: [{ name: 'Above median', col: ME }, { name: 'Below median', col: CORAL }, { name: 'Hollow: under 15% used', col: DIM },
+          ...(med ? [{ name: `Median ${fmt(med)}`, col: DIM, glyph: '┄' }] : [])],
       }
       text.push(`Limit size: ${right}`)
     }
@@ -774,7 +825,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
             ? `<rect x="${x + 0.75}" y="${y + 0.75}" width="${w - 1.5}" height="${ch - 1.5}" rx="2" fill="none" stroke="${col}" stroke-width="1.5"/>`
             : `<rect x="${x}" y="${y}" width="${w}" height="${ch}" rx="2" fill="${col}"/>`
           const sign = diff >= 0.005 ? '+' : diff <= -0.005 ? '−' : ''
-          hv += hover(hitRect(x, y, w, ch), `<rect x="${x - 1}" y="${y - 1}" width="${w + 2}" height="${ch + 2}" rx="3" fill="none" stroke="${INK}" stroke-width="1.5"/>`,
+          hv += hover(hitRect(x, y, w, ch), `<rect x="${x - 1}" y="${y - 1}" width="${w + 2}" height="${ch + 2}" rx="3" class="o"/>`,
             tipBox(x + w / 2, y + ch + 4, H, [`${WEEK[r]} ${hourTxt(b * bh)} to ${hourTxt(((b + 1) * bh) % 24)}`,
               `${sign}${Math.abs(Math.round(diff * 100))}% vs median`, `${fmt(c.per1)} work units per 1%`,
               `${c.n} ticks, ${c.pct}% moved`, `Likely range ±${Math.round((c.err / c.per1) * 100)}%${thin ? ', too wide to judge' : ''}`]))
@@ -847,7 +898,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         row.forEach((u, h) => {
           const t = u / max, x = x0 + h * cell + 1, y = r * (ch + 2)
           out += `<rect x="${x}" y="${y}" width="${cell - 2}" height="${ch}" rx="2" fill="${t < 0.02 ? EMPTY : ME}" fill-opacity="${t < 0.02 ? 1 : (0.18 + t * 0.82).toFixed(2)}"/>`
-          hv += hover(hitRect(x - 1, y - 1, cell, ch + 2), `<rect x="${x - 1}" y="${y - 1}" width="${cell}" height="${ch + 2}" rx="3" fill="none" stroke="${INK}" stroke-width="1.5"/>`,
+          hv += hover(hitRect(x - 1, y - 1, cell, ch + 2), `<rect x="${x - 1}" y="${y - 1}" width="${cell}" height="${ch + 2}" rx="3" class="o"/>`,
             tipBox(x + cell / 2, y + ch + 4, H, [`${WEEK[r]} ${hourTxt(h)} to ${hourTxt((h + 1) % 24)}`, u > 0 ? valTxt(u) : 'No work',
               ...(u > 0 ? [`${fmt(u)} work units · ${Math.round((u / all) * 100)}% of ${range} days`] : [])]))
         })
@@ -867,12 +918,18 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const sy = (x: number) => (x / max) * (base - top)
     const sx = (HW - x0) / keys.length, gap = sx > 6 ? 2 : 1, bw = Math.max(1, sx - gap)
     let out = `<defs>${gradDef('rn', ME, true)}</defs>` + [0, max / 2, max].map(t => gridLine(x0, base - sy(t), tick(t))).join(''), hv = ''
+    for (const [a, z] of hoverSpans(keys.length)) {
+      const cx = x0 + ((a + z + 1) / 2) * sx
+      const name = a === z ? longDay(keys[a]) : `${shortDay(keys[a])} to ${shortDay(keys[z])}`
+      const t = totals.slice(a, z + 1).reduce((p, q) => p + q, 0)
+      const r = keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.r ?? 0), 0)
+      hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
+        tipBox(cx, top, H, t > 0
+          ? [name, `Re-reading ${Math.round((r / t) * 100)}% · ${valTxt(r)}`, `New work ${valTxt(t - r)}`, `Total ${valTxt(t)}`]
+          : [name, 'No work']))
+    }
     keys.forEach((k, i) => {
-      const b = D[k], t = totals[i], cx = x0 + i * sx + sx / 2
-      hv += hover(hitRect(x0 + i * sx, top, sx, base - top), crossX(cx, top, base),
-        tipBox(cx, top, H, b && t > 0
-          ? [longDay(k), `Re-reading ${Math.round((b.r / t) * 100)}% · ${valTxt(b.r)}`, `New work ${valTxt(t - b.r)}`, `Total ${valTxt(t)}`]
-          : [longDay(k), 'No work']))
+      const b = D[k], t = totals[i]
       if (!b || t <= 0) return
       const hh = sy(val(b.r)), nh = sy(val(t - b.r)), x = x0 + i * sx + gap / 2
       out += `<rect x="${x}" y="${base - hh}" width="${bw}" height="${hh}" fill="${HIST}"/>` + upBar(x, base - hh - nh, bw, Math.max(0.5, nh - 1), 'url(#rn)')
@@ -900,9 +957,9 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
 
   L.push('## The band, row by row', '')
   L.push('- **7D / 5H bars**: how much of the weekly and 5-hour limits is used. The colour runs green (plenty left) to red (nearly full). `~` marks an estimated hundredth: the meter itself moves in whole points.')
-  L.push('- **Above each bar**: the **pace** over the last hour (5H) or day (7D) of real ticks, and when the limit **resets**. If at that pace it would hit 100% first, the right side turns red: **runs out in N · resets in M**.')
+  L.push('- **Inside each bar** (above it in a terminal): the **pace** over the last hour (5H) or day (7D) of real ticks, and when the limit **resets**. If at that pace it would hit 100% first it says **runs out in N · resets in M**. Short of room, the pace goes first, then the reset time shortens. In Mini, a limit that would run out turns into a ring with its percent and **out in N** beside it, so the line keeps its other parts.')
   L.push('- **Last turn**: what your last message and the full reply cost (every model call in it, subagents included), in % of the 5H limit; what the same turn would cost **in a new session** that took over through a hand-off note, with the ratio in brackets; and how many turns a **hand-off** takes to pay for itself (writing the note plus the new session caching its start). The **Cost pill** on the right turns that into a call (rules below).')
-  L.push('- **Next turn**: what your next turn here should cost, in % of 5H: the middle of your last 3 finished turns, re-priced on the model you are on now, plus the one-time re-cache when the cache is cold. A forecast; Last turn is the measured one.')
+  L.push('- **Next turn** ("next" on the Last turn line): what your next turn here should cost, in % of 5H: the middle of your last 3 finished turns, re-priced on the model you are on now, plus the one-time re-cache when the cache is cold. A forecast; Last turn is the measured one.')
   L.push('- **Turns**: one small bar per turn of this whole session: grey is the part spent **re-reading** the old conversation, violet the **new work**. Dim bars were before the current 5H window started (a thin line marks its start). Then the turn count, how much of the 5H limit this session has **used** since the window began, and its share of **last hour\'s use** (everything Claude Code used on this computer in the last hour, subagents included). Open the band in each session to see which one is eating the limit.')
   L.push('- **Context**: context size, how much of the window is used, how much it grows per turn, and how close auto-compact is, with the **Context pill**: a warning that the session is getting long enough for the model to lose track of earlier detail.')
   L.push('- **Cache**: the prompt cache clock. **Active** means the conversation is still in the prompt cache, so the next message reads it cheaply (a *cache read*). An hour after the last reply the cache **expires**, and the next message here costs extra to re-cache the whole conversation (a *cache write*), once. A cache belongs to one model: after switching models it shows **Model changed**, and the next message pays that re-cache too.')
@@ -965,7 +1022,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading).')
   L.push('- **5H pace**: this window\'s readings against the middle half of your past windows, with the projection to 100%.')
   L.push('- **7D pace**: this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
-  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window, dated by the day it started. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
+  L.push('- **Limit size**: work per 1% of 5H, one dot per finished window, dated by the day it started. Violet above the median (a bigger limit), coral below (a smaller one), grey near it, full colour at 20% off. Hollow dots used under 15% and are noisy; it calls a trend only from 8 solid windows.')
   L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Purple is a bigger limit, coral a smaller one. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and outside use. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
@@ -1035,6 +1092,7 @@ type IO = {
   keys: () => Promise<string[]>
   del: (k: string) => Promise<void>
   show: (fn: (v: View | null) => View | null) => Promise<void>
+  hist: (fn: (v: View | null) => View | null) => Promise<void>
   toast: (text: string) => void
   notify: (text: string) => Promise<any>
   osa: (text: string) => Promise<RunResult>
@@ -1052,6 +1110,8 @@ export const register: Register = on => {
   let turnRunning = false // one of your turns is running (not a subagent's)
   let compactAt: number | undefined
   let compactOff = false  // auto-compact is switched off: no auto-compact estimates at all
+  let histAt = 0          // when the History pane's copy (histAtom) was last written
+  let histFull = false    // whether that copy already had the older days
   let compactAtRead = 0
   let pruned = 0          // when old per-session entries were last cleared out
   let version = ''        // from plugin.json, shown after the title
@@ -1254,6 +1314,14 @@ export const register: Register = on => {
         unpriced: sums._unpriced, history: sums._history, byTime: sums._byTime ?? undefined,
       }
       await io.show(() => nv)
+      // The History pane's copy: first time, when the older days arrive, or
+      // every 5 minutes at most (see histAtom).
+      const full = !!nv.history?.full
+      if (!histAt || (full && !histFull) || nowMs - histAt >= HIST_EVERY_MS) {
+        histAt = nowMs
+        histFull = full
+        await io.hist(() => nv)
+      }
       // So the next session (and this one after a reload) can draw at once.
       const curSamples = samples.filter(s => wins.some(w => w.kind === s.kind && w.resetsAt === s.resetsAt))
       await save(io, 'last', { ...nv, samples: curSamples, session: undefined }, nowMs)
@@ -1309,6 +1377,7 @@ export const register: Register = on => {
       del: k => $.store.delete(k),
       id: () => $.session.id(),
       show: fn => update($, view, fn as any),
+      hist: fn => update($, histAtom, fn as any),
       toast: text => $.ui.toast(`Mana Pool · ${text}`, { timeoutMs: 8000 }),
       notify: text => $.ui.notify(text, { title: 'Mana Pool' }),
       // macOS's own notification; the text is ours (numbers and fixed words), quotes stripped anyway
@@ -1332,7 +1401,7 @@ export const register: Register = on => {
     // turns the spinner while a refresh is pending
     $.clock.every(160, async () => {
       if (!spinning) return
-      await update($, view, v => (v ? { ...v, refreshing: true, frame: ((v.frame ?? 0) + 1) % 10 } : v) as any)
+      await update($, spinAtom, f => ((f ?? 0) + 1) % 10)
     })
     // Draw at once from the last saved numbers (this session's own turns when
     // it has run before), then the first real refresh replaces them.
@@ -1344,6 +1413,8 @@ export const register: Register = on => {
       await update($, view, () => (last && last.wins?.length
         ? { ...last, samples, session: mine?.session, refreshing: true }
         : { wins: [], samples, updatedAt: 0, refreshing: true }) as any)
+      // The History pane draws from the saved numbers too until the first refresh.
+      if (last && last.wins?.length) await update($, histAtom, () => ({ ...last, samples, session: mine?.session }) as any)
     } catch { /* nothing saved yet */ }
     dirty = false
     lastFull = await $.clock.now()
@@ -1432,8 +1503,12 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const v = await read($, view)
     if (e.props.hasSurvey || !v) return next(e)
-    const { Box, Text, Button, Svg } = $.ui.resolve(e) as any
+    const { Box, Text, Button, Svg: SvgEl } = $.ui.resolve(e) as any
+    // The terminal's table has an Svg that draws nothing there, so treat the
+    // terminal as having none: it gets the block bars and text lines instead.
+    const Svg = e.surface === 'terminal' ? undefined : SvgEl
     const FR = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    const frame = (await read($, spinAtom)) ?? 0
     if (v.wins.length === 0) {
       // A failed first read used to leave the band hidden: show why instead.
       if (!v.refreshing && v.error) return (
@@ -1446,7 +1521,7 @@ export const register: Register = on => {
       return (
         <Box paddingX={1}>
           <Text size="body" weight="semibold">Mana Pool</Text>
-          <Text size="caption" dimColor>  {FR[(v.frame ?? 0) % 10]}  reading your transcripts…</Text>
+          <Text size="caption" dimColor>  {FR[frame % 10]}  reading your transcripts…</Text>
         </Box>
       )
     }
@@ -1458,11 +1533,18 @@ export const register: Register = on => {
     const tag = (w: Win) => (w.kind === 'five_hour' ? '5H' : '7D')
     const lab = { size: 'footnote', dimColor: true } as any
     const note = { size: 'footnote', dimColor: true } as any
-    const spin = () => (v.refreshing ? <Text {...note}>  {FR[(v.frame ?? 0) % 10]}</Text> : null)
+    const spin = () => (v.refreshing ? <Text {...note}>  {FR[frame % 10]}</Text> : null)
     const icon = (glyph: string, name: string, onPress: () => void) => <Button key={name} label={glyph} plain dimColor onPress={onPress} />
     const openManual = () => $.ui.open({ id: PANE, title: 'Mana Pool' })
     const openHistory = () => $.ui.open({ id: HPANE, title: 'Mana Pool History' })
     const P = (u: number) => (d.ok ? pctTxt(d.pc(u)) : '—')
+    // The band's width in cells, and a rough width for a run of footnote text:
+    // one cell per character in a terminal; the desktop's proportional type
+    // is narrower (about 0.75 of a cell).  Used to drop or shorten parts that
+    // would otherwise push the buttons off the right edge or wrap a row.
+    const cols = (e.props.bodyColumns as number) || 90
+    const tw = (s: string) => s.length * (Svg ? 0.72 : 1) // measured: 6.3 px a character at footnote size on the desktop
+    const ICONS_W = 9 // the three icon buttons (about 80 px on the desktop)
 
     // A usage bar: rounded gradient on graphical surfaces, flat blocks in a terminal.
     const bar = (frac: number, W: number, H: number, uid: string) => {
@@ -1508,30 +1590,46 @@ export const register: Register = on => {
         `<clipPath id="${uid}r"><rect width="${W}" height="${H}" rx="${H / 2}"/></clipPath>` +
         `<clipPath id="${uid}f"><rect width="${px}" height="${H}"/></clipPath><clipPath id="${uid}e"><rect x="${px}" width="${Math.max(0, W - px)}" height="${H}"/></clipPath></defs>` +
         `<g clip-path="url(#${uid}r)"><rect width="${W}" height="${H}" fill="${track}"/>${px > 0 ? `<rect width="${px}" height="${H}" fill="url(#${uid}g)"/>` : ''}</g>` +
-        txt('#1d1d1d', `${uid}f`) + txt('#ececec', `${uid}e`) + `</svg>`
+        txt('#1d1d1d', `${uid}f`) + txt(INK, `${uid}e`) + `</svg>`
       return <Box width={Math.ceil(W / 8.8)} flexShrink={0}><Svg source={src} alt={label} width={W} height={H} /></Box>
     }
 
-    // A verdict pill: tinted capsule with coloured text (12% of the colour over the band: 4.5:1+ for every level).
+    // The 5H ring: the meter as a 16 px donut.  Mini draws it in place of the
+    // bar while the limit would run out, so the percent and "out in" fit
+    // beside it in about the space the bar alone took.
+    const ring = (frac: number, uid: string, S = 16) => {
+      const f = Math.max(0, Math.min(1, frac)), tip = tipOk(f * 100)
+      const r = (S - 3) / 2, c = 2 * Math.PI * r, m = S / 2
+      const src = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}">` +
+        `<circle cx="${m}" cy="${m}" r="${r}" fill="none" stroke="${mix(SURFACE, hexOk(tip), 0.24)}" stroke-width="3"/>` +
+        (f > 0 ? `<circle cx="${m}" cy="${m}" r="${r}" fill="none" stroke="${hexOk(shiftEnd(tip))}" stroke-width="3" stroke-linecap="round" stroke-dasharray="${(c * f).toFixed(2)} ${c.toFixed(2)}" transform="rotate(-90 ${m} ${m})"/>` : '') +
+        `</svg>`
+      return <Box key={uid} width={Math.ceil(S / 8.8)} flexShrink={0}><Svg source={src} alt={`${Math.round(f * 100)}%`} width={S} height={S} /></Box>
+    }
+
+    // A verdict pill, Runenir's badge: a 14% tint of the level colour, a 1 px
+    // edge at 35%, and the words in main text (APCA Lc 87+ at every level).
     // outline: Mini's pill also carries the level in its border, only when
     // something needs attention: dotted for amber, dashed for red.  Green and
-    // blue stay a plain tinted pill so a calm state stays quiet.
+    // blue keep the faint badge edge so a calm state stays quiet.
     // W: a fixed width (Mini's pill matches its bars); otherwise sized to the label.
     // right: the pill ends at its box's right edge (its box is rounded up to
     // whole cells, so a left-aligned pill would stop a few pixels short).
     const pill = (p: Pill, uid: string, outline = false, H = 20, W = 0, right = false) => {
-      const col = LVL[p.lvl]
+      const col = LVL[p.lvl] ?? LVL[0]! // a level is always 0 to 3
       if (Svg) {
         const wpx = W || Math.round(p.label.length * 6.9 + 22)
         const ty = Math.round(H / 2 + 4) // text baseline, centred for 12 px type
         const dash = p.lvl === 2 ? ' stroke-dasharray="0.1 3.2" stroke-linecap="round"' : p.lvl === 3 ? ' stroke-dasharray="5 3"' : ''
         const src = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${wpx} ${H}" width="${wpx}" height="${H}">` +
-          `<rect width="${wpx}" height="${H}" rx="${H / 2}" fill="${mix(SURFACE, col, 0.12)}"/>` +
-          (outline && p.lvl >= 2 ? `<rect x="0.75" y="0.75" width="${wpx - 1.5}" height="${H - 1.5}" rx="${(H - 1.5) / 2}" fill="none" stroke="${col}" stroke-width="1.5"${dash}/>` : '') +
-          `<text x="${wpx / 2}" y="${ty}" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" font-size="12" fill="${col}">${p.label}</text></svg>`
+          `<rect width="${wpx}" height="${H}" rx="${H / 2}" fill="${mix(SURFACE, col, 0.14)}"/>` +
+          (outline && p.lvl >= 2 ? `<rect x="0.75" y="0.75" width="${wpx - 1.5}" height="${H - 1.5}" rx="${(H - 1.5) / 2}" fill="none" stroke="${col}" stroke-width="1.5"${dash}/>`
+            // Runenir badge: a 1 px edge at 35% of the level colour.
+            : `<rect x="0.5" y="0.5" width="${wpx - 1}" height="${H - 1}" rx="${(H - 1) / 2}" fill="none" stroke="${mix(SURFACE, col, 0.35)}"/>`) +
+          `<text x="${wpx / 2}" y="${ty}" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" font-size="12" fill="${INK}">${p.label}</text></svg>`
         return <Box key={uid} width={Math.ceil(wpx / 8.8)} flexShrink={0} justifyContent={right ? 'flex-end' : 'flex-start'}><Svg source={src} alt={p.label} width={wpx} height={H} /></Box>
       }
-      return <Text key={uid} color={col}>[{p.label}]</Text>
+      return <Text key={uid}><Text color={col}>[</Text>{p.label}<Text color={col}>]</Text></Text>
     }
 
     // MINI: one line.  Bars, the 5H runway when it runs out, the last turn, the worst pill.
@@ -1543,20 +1641,51 @@ export const register: Register = on => {
       const MINI_W = 92
       const rw5 = d.w5 ? d.runway(d.w5) : null
       const ft = { size: 'footnote', tabular: true, wrap: 'truncate' } as any
+      // While 5H would run out, its bar turns into a ring with the percent and
+      // "out in" beside it (desktop and phone; the terminal has no Svg and
+      // keeps the bar).  That warning then costs about the bar's own width.
+      // Fit the line to the band.  Each group's width is estimated in cells;
+      // if the line would still push the buttons off the right edge, groups
+      // drop in order of least use: Cache, then Last turn, then the 7D bar,
+      // and last "runs out in" shortens to "out in".  The 5H meter always stays.
+      const barCells = Svg ? MINI_W / 8.8 : Math.ceil(MINI_W / 8.8)
+      const ringMode = !!Svg && !!rw5?.bad
+      const runTxt = (short: boolean) => (rw5?.bad ? `${short ? ' out in' : ' runs out in'} ${dur(rw5.leftMs)}` : '')
+      const ringTxt = (w: Win) => `${d.est(w).toFixed(1)}%`
+      const cacheTxt = d.idle === null ? '' : d.warm ? dur(TTL_MS - d.idle) : d.otherModel ? 'Cold' : 'Expired'
+      const winCells = (w: Win, short: boolean) => 2 + tw(`${tag(w)} `) + (
+        w.kind !== 'five_hour' ? barCells
+          : ringMode ? 2 + tw(`${ringTxt(w)} ·${runTxt(true)}`)
+            : barCells + tw(runTxt(short)))
+      const fit = { cache: d.idle !== null, last: !!d.lt, w7: true, short: false }
+      const need = () =>
+        tw('Mana Pool') + (v.refreshing ? 3 : 0) +
+        wins.reduce((n, w) => n + (w.kind === 'seven_day' && !fit.w7 ? 0 : winCells(w, fit.short)), 0) +
+        (fit.last ? 2 + tw('Last turn ') + barCells : 0) +
+        (fit.cache ? 2 + tw(`Cache ${cacheTxt}`) : 0)
+      const room = cols - 2 - ICONS_W - 1 // one cell spare: the estimate is close, not exact
+      for (const k of ['cache', 'last', 'w7'] as const) if (need() > room) fit[k] = false
+      if (need() > room) fit.short = true
       return (
         <Box paddingX={1} justifyContent="space-between" alignItems="center">
-          <Box alignItems="center">
+          <Box alignItems="center" flexShrink={1} minWidth={0} overflow="hidden">
             <Box flexShrink={0}><Text size="footnote" weight="semibold" wrap="truncate">Mana Pool</Text>{spin()}</Box>
-            {wins.map(w => (
+            {wins.filter(w => w.kind !== 'seven_day' || fit.w7).map(w => (
               <Box key={w.kind} marginLeft={2} flexShrink={0} alignItems="center">
                 <Text {...lab} wrap="truncate">{tag(w)} </Text>
-                {barIn(d.est(w) / 100, `${d.est(w).toFixed(1)}%`, MINI_W, 16, `m${w.kind}`)}
-                {w.kind === 'five_hour' && rw5?.bad ? <Text {...ft} color={RED}> runs out in {dur(rw5.leftMs)}</Text> : null}
+                {w.kind === 'five_hour' && ringMode
+                  ? <Box alignItems="center" flexShrink={0}>
+                      {ring(d.est(w) / 100, `r${w.kind}`)}
+                      <Text {...ft} weight="medium" color={tone(d.est(w))}> {ringTxt(w)}</Text>
+                      <Text {...ft} color={RED}> ·{runTxt(true)}</Text>
+                    </Box>
+                  : barIn(d.est(w) / 100, `${d.est(w).toFixed(1)}%`, MINI_W, 16, `m${w.kind}`)}
+                {w.kind === 'five_hour' && rw5?.bad && !ringMode ? <Text {...ft} color={RED}>{runTxt(fit.short)}</Text> : null}
               </Box>
             ))}
             {/* The last turn: grey label, then a pill coloured by the worse of
                 Cost and Context; a dotted (amber) or dashed (red) border marks a warning. */}
-            {d.lt ? (
+            {d.lt && fit.last ? (
               <Box marginLeft={2} flexShrink={0} alignItems="center">
                 <Text {...lab} wrap="truncate">Last turn </Text>
                 {pill({ ...d.worst, label: `${P(d.lt.u)} · ${d.ratio.toFixed(1)}x` }, 'mini', true, 16, MINI_W)}
@@ -1564,14 +1693,14 @@ export const register: Register = on => {
             ) : null}
             {/* Prompt cache clock: minutes until it expires (after that the next
                 message pays a one-time cache write), or Expired. */}
-            {d.idle !== null ? (
+            {d.idle !== null && fit.cache ? (
               <Box marginLeft={2} flexShrink={0} alignItems="center">
                 <Text {...lab} wrap="truncate">Cache </Text>
-                <Text {...ft} color={d.warm ? '#f6b26b' : '#7fb2ff'}>{d.warm ? dur(TTL_MS - d.idle) : d.otherModel ? 'Cold' : 'Expired'}</Text>
+                <Text {...ft} color={d.warm ? WARM : COLD}>{cacheTxt}</Text>
               </Box>
             ) : null}
           </Box>
-          <Box alignItems="center">
+          <Box alignItems="center" flexShrink={0}>
             {icon('▤', 'History', openHistory)}
             {icon('ⓘ', 'Manual', openManual)}
             <Box>{icon('⊕', 'Expand', () => update($, mode, () => 'full'))}</Box>
@@ -1628,14 +1757,20 @@ export const register: Register = on => {
     const chkLow = showChk && chkDelta <= -0.15
     const chkPct = Math.round(Math.abs(chkDelta) * 100)
     const chkCmp = chkPct === 0 ? 'about the same work as usual' : `${chkPct}% ${chkDelta < 0 ? 'less' : 'more'} work than usual`
-    const COLW = 23 // one model column in the Other models table, in cells (14 + 3 x 23 = 83)
     // A hairline between sections, the band's full width.  Sections are spaced
     // the same way everywhere: one small step above and below each line, and
     // no extra space between the rows inside a section.
-    const cols = (e.props.bodyColumns as number) || 90
     // Every Full row shares one right edge: the bars' (two 40-cell columns
     // and a 3-cell gap).  Rows below used to stretch to the band's own edge.
     const CW = Math.min(83, cols - 2)
+    // The two meter columns share CW with a 3-cell gap, so a narrow band
+    // shrinks the bars instead of pushing the 5H column off the edge.
+    // Too narrow for two meters side by side (under 52 cells): stack them,
+    // each the band's full width.
+    const stack = CW < 52
+    const MW = stack ? CW : Math.floor((CW - 3) / 2)
+    // One model column in the Other models table (14 + 3 x 23 = 83 at full width).
+    const COLW = Math.max(10, Math.min(23, Math.floor((CW - LABW) / Math.max(1, d.switchRows.length))))
     const sep = (k: string) => {
       // A 9 px strip with a 1 px line through its middle: the strip is the
       // spacing, so no margins (a full text row per line made Full scroll).
@@ -1643,7 +1778,7 @@ export const register: Register = on => {
       return (
         <Box key={k} flexShrink={0}>
           {Svg
-            ? <Svg source={`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 9" width="${W}" height="9"><rect y="4" width="${W}" height="1" fill="#474747"/></svg>`} alt="divider" width={W} height={9} />
+            ? <Svg source={`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 9" width="${W}" height="9"><rect y="4" width="${W}" height="1" fill="${SEP}"/></svg>`} alt="divider" width={W} height={9} />
             : <Text dimColor>{'─'.repeat(Math.max(10, CW))}</Text>}
         </Box>
       )
@@ -1661,26 +1796,59 @@ export const register: Register = on => {
         </Box>
 
         {/* The two meters: how full, when they reset, and whether they last. */}
-        <Box marginTop="sm">
+        <Box marginTop="sm" flexDirection={stack ? 'column' : 'row'}>
           {wins.map((w, wi) => {
             const rw = d.runway(w)
             const est = d.est(w)
+            // The line above the bar must fit MW cells on one line.  Drop the
+            // pace first, then shorten "resets in" (or, when it would run
+            // out, drop the reset time and keep "runs out in").
+            const resetTxt = w.resetsAt ? dur(Date.parse(w.resetsAt) - now) : '?'
+            const leftW = tw(`${tag(w)}  ~${est.toFixed(2)}%`) + (v.refreshing ? 3 : 0)
+            const paceS = !rw.bad && rw.r > 0 ? ` · ${paceTxt(w, rw.r)}` : ''
+            const rightOpts = rw.bad
+              ? [`${rw.text} · resets in ${resetTxt}`, `${rw.text} · resets ${resetTxt}`, rw.text]
+              : [`resets in ${resetTxt}`, `resets ${resetTxt}`]
+            const showPace = !!paceS && leftW + tw(paceS) + 1 + tw(rightOpts[0]) <= MW
+            const rightTxt = rightOpts.find(t => leftW + 1 + tw(t) <= MW) ?? rightOpts[rightOpts.length - 1]
+            // Desktop and phone: the whole line sits inside the bar (as in Mini),
+            // which saves a row.  It shortens to fit: pace goes first, then
+            // "resets in" becomes "resets", then the reset time goes.
+            if (Svg) {
+              const tagW = tw(`${tag(w)} `) + 1
+              const Wpx = Math.round((MW - tagW) * 8.8)
+              const fits = (t: string) => t.length * 6.6 + 16 <= Wpx // 12 px medium type
+              const pct = `${est === w.pct ? '' : '~'}${est.toFixed(2)}%`
+              const opts = rw.bad
+                ? [`${pct} · ${rw.text} · resets in ${resetTxt}`, `${pct} · ${rw.text} · resets ${resetTxt}`, `${pct} · ${rw.text}`]
+                : [`${pct}${paceS} · resets in ${resetTxt}`, `${pct} · resets in ${resetTxt}`, `${pct} · resets ${resetTxt}`, pct]
+              const label = opts.find(fits) ?? opts[opts.length - 1]!
+              return (
+                <Box key={w.kind} flexShrink={0} width={MW} marginRight={wi === 0 && !stack ? 3 : 0} alignItems="center">
+                  <Box width={tagW} flexShrink={0}><Text {...lab}>{tag(w)}</Text></Box>
+                  {barIn(est / 100, esc(label), Wpx, 18, `g${w.kind}`)}
+                </Box>
+              )
+            }
             return (
-              <Box key={w.kind} flexDirection="column" flexShrink={0} width={40} marginRight={wi === 0 ? 3 : 0}>
+              <Box key={w.kind} flexDirection="column" flexShrink={0} width={MW} marginRight={wi === 0 && !stack ? 3 : 0}>
                 {/* One line above the bar: percent and pace; reset time on the right.
                     Only when it would run out first does the right side turn red
                     and say so (pace is dropped then, to make room). */}
                 <Box justifyContent="space-between">
-                  <Text>
+                  {/* The percent never shrinks or wraps; the reset text on the right gives way. */}
+                  <Box flexShrink={0}><Text>
                     <Text {...lab}>{tag(w)}  </Text>
                     <Text size="footnote" weight="medium" tabular dimColor={!!v.refreshing} color={tone(w.pct)}>{est === w.pct ? '' : '~'}{est.toFixed(2)}%</Text>{spin()}
-                    {!rw.bad && rw.r > 0 ? <Text {...fn}>{' · '}{paceTxt(w, rw.r)}</Text> : null}
-                  </Text>
-                  {rw.bad
-                    ? <Text size="footnote" color={RED}>{rw.text} · resets in {w.resetsAt ? dur(Date.parse(w.resetsAt) - now) : '?'}</Text>
-                    : <Text {...fn}>resets in {w.resetsAt ? dur(Date.parse(w.resetsAt) - now) : '?'}</Text>}
+                    {showPace ? <Text {...fn}>{paceS}</Text> : null}
+                  </Text></Box>
+                  <Box flexShrink={1} minWidth={0} justifyContent="flex-end">
+                    {rw.bad
+                      ? <Text size="footnote" color={RED} wrap="truncate">{rightTxt}</Text>
+                      : <Text {...fn} wrap="truncate">{rightTxt}</Text>}
+                  </Box>
                 </Box>
-                {bar(est / 100, 352, 12, `g${w.kind}`)}
+                {bar(est / 100, Math.round(MW * 8.8), 12, `g${w.kind}`)}
               </Box>
             )
           })}
@@ -1688,59 +1856,46 @@ export const register: Register = on => {
 
         {/* Last turn: cost, the same turn fresh, the ratio, the hand-off pay-back, the Cost pill. */}
         <Box marginTop="sm" justifyContent="space-between">
-          <Box>
+          <Box flexShrink={1} minWidth={0}>
             {Lab('Last turn')}
             {d.lt ? (
-              <Text>
+              <Text wrap="truncate">
                 <Text size="footnote" tabular>{P(d.lt.u)}</Text>
-                <Text {...fn}> of 5H · in a new session ~{P(d.lt.f)} (</Text>
+                {/* Next turn: what the next turn here should cost (last 3 turns). */}
+                <Text {...fn}> of 5H · next {d.nextU === null ? 'unpriced' : `~${P(d.nextU)}`} · new session ~{P(d.lt.f)} (</Text>
                 <Text size="footnote" tabular>{d.ratio.toFixed(1)}x</Text>
                 <Text {...fn}>) · hand-off: {d.turnsTxt(d.payback)}</Text>
               </Text>
             ) : <Text {...fn}>no finished turn yet</Text>}
           </Box>
-          {pill(d.cost, 'cost', false, 16, 0, true)}
+          <Box flexShrink={0} marginLeft={1}>{pill(d.cost, 'cost', false, 16, 0, true)}</Box>
         </Box>
-
-        {/* Next turn: what your next turn here should cost, from your last 3 turns. */}
-        {d.lt ? (
-          <Box>
-            {Lab('Next turn')}
-            <Text>
-              {d.nextU === null
-                ? <Text {...fn}>unpriced on {d.meName} (current)</Text>
-                : <Text>
-                    <Text size="footnote" tabular>~{P(d.nextU)}</Text>
-                    <Text {...fn}> of 5H on {d.meName} (current), from your last {d.fin.length === 1 ? 'turn' : `${d.fin.length} turns`}</Text>
-                  </Text>}
-            </Text>
-          </Box>
-        ) : null}
 
         {/* Turns: the strip, then this session's turns and its share of 5H since the window began. */}
         <Box justifyContent="space-between">
-          <Box>
+          <Box flexShrink={1} minWidth={0}>
             {Lab('Turns')}
             {strip()}
-            <Text {...fn}>{d.ses ? `${d.ses.turnCount} turn${d.ses.turnCount === 1 ? '' : 's'} · used ${P(d.ses.since5h.units)} of 5H${share !== null && share !== undefined ? ` · ${Math.round(share * 100)}% of last hour's use` : ''}` : 'no turns yet'}</Text>
+            <Text {...fn} wrap="truncate">{d.ses ? `${d.ses.turnCount} turn${d.ses.turnCount === 1 ? '' : 's'} · used ${P(d.ses.since5h.units)} of 5H${share !== null && share !== undefined ? ` · ${Math.round(share * 100)}% of last hour's use` : ''}` : 'no turns yet'}</Text>
           </Box>
-          <Text size="footnote"><Text color={HIST}>■</Text><Text {...fn}> re-reading  </Text><Text color={ME}>■</Text><Text {...fn}> new work</Text></Text>
+          {/* The legend keeps its size; the turn count on the left shortens instead. */}
+          <Box flexShrink={0} marginLeft={1}><Text size="footnote"><Text color={HIST}>■</Text><Text {...fn}> re-reading  </Text><Text color={ME}>■</Text><Text {...fn}> new work</Text></Text></Box>
         </Box>
 
         {/* Context: size, % used, growth and auto-compact, with the Context pill. */}
         <Box justifyContent="space-between">
-          <Box>
+          <Box flexShrink={1} minWidth={0}>
             {Lab('Context')}
-            <Text {...fn}>{d.detail.why}</Text>
+            <Text {...fn} wrap="truncate">{d.detail.why}</Text>
           </Box>
-          {pill(d.detail, 'detail', false, 16, 0, true)}
+          <Box flexShrink={0} marginLeft={1}>{pill(d.detail, 'detail', false, 16, 0, true)}</Box>
         </Box>
 
         {/* Prompt cache clock and what its expiry costs. */}
         <Box>
           {Lab('Cache')}
-          <Text>
-            <Text size="footnote" color={d.idle === null ? DIM : d.warm ? '#f6b26b' : '#7fb2ff'}>{d.idle === null ? 'No reply yet' : d.warm ? 'Active' : d.otherModel ? 'Model changed' : 'Expired'}</Text>
+          <Text wrap="truncate">
+            <Text size="footnote" color={d.idle === null ? DIM : d.warm ? WARM : COLD}>{d.idle === null ? 'No reply yet' : d.warm ? 'Active' : d.otherModel ? 'Model changed' : 'Expired'}</Text>
             <Text {...fn}>
               {d.idle === null ? '' : d.warm
                 ? ` · expires in ${dur(TTL_MS - d.idle)} · after that, ${d.reloadU === null ? 're-cache unpriced' : `next message costs +${P(d.reloadU)} to re-cache`}`
@@ -1753,7 +1908,7 @@ export const register: Register = on => {
         {showChk ? (
           <Box>
             {Lab('Limit check')}
-            <Text>
+            <Text wrap="truncate">
               {chkLow
                 ? <Text size="footnote" color={RED}>1% of 5H buys {chkCmp}</Text>
                 : <Text><Text size="footnote">normal</Text><Text {...fn}> · 1% of 5H buys {chkCmp}</Text></Text>}
@@ -1768,7 +1923,7 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Box>
             {Lab('Other models')}
-            {d.switchRows.map(r => <Box key={r.k} width={COLW} flexShrink={0}><Text size="footnote">{cap(r.k)}</Text></Box>)}
+            {d.switchRows.map(r => <Box key={r.k} width={COLW} flexShrink={0} paddingRight={1}><Text size="footnote">{cap(r.k)}</Text></Box>)}
           </Box>
           {([['now', 'switch now'], ['handoff', 'hand off']] as const).map(([path, name]) => (
             <Box key={path}>
@@ -1778,8 +1933,8 @@ export const register: Register = on => {
                 const turn = path === 'now' ? r.nowTurn : r.hoTurn
                 const best = r.pick === path
                 return (
-                  <Box key={r.k} width={COLW} flexShrink={0}>
-                    <Text size="footnote" tabular color={best ? LVL[0] : undefined} dimColor={!best}>
+                  <Box key={r.k} width={COLW} flexShrink={0} paddingRight={1}>
+                    <Text size="footnote" tabular color={best ? LVL[0] : undefined} dimColor={!best} wrap="truncate">
                       {d.ok ? `${once === null ? 'unpriced' : `+${pctTxt(once)}`}, then ${pctTxt(turn)}/turn` : '—'}
                     </Text>
                   </Box>
@@ -1810,10 +1965,11 @@ export const register: Register = on => {
   // The History pane: charts of past use (see historyView).
   on('ui.render', { component: 'Pane', requestId: HPANE }, async ($, e) => {
     const { Box, Text, Button, Svg } = $.ui.resolve(e) as any
-    const v = await read($, view)
+    // Reads histAtom, not `view` or `lastReply`: see histAtom for why.
+    const v = await read($, histAtom)
     if (!v) return <Text dimColor>Reading transcripts…</Text>
     const range = ((await read($, rangeAtom)) ?? 30) as HistRange
-    const last = (await read($, lastReply)) ?? (v.session?.lastSeen ? v.session.lastSeen * 1000 : null)
+    const last = v.session?.lastSeen ? v.session.lastSeen * 1000 : null
     const ledger = ((await $.store.get('ledger').catch(() => [])) ?? []) as LedgerRow[]
     // The pane's width: its columns over the code font's advance (8.8 px, the
     // same figure the band sizes its boxes by), less a little slack.
@@ -1829,9 +1985,9 @@ export const register: Register = on => {
         onPress={() => update($, rangeAtom, () => r)} />
     )
     // A legend: a coloured square, then the name in text colour (identity never by colour alone).
-    const legend = (items?: { name: string; col: string }[]) => items?.length ? (
+    const legend = (items?: { name: string; col: string; glyph?: string }[]) => items?.length ? (
       <Box flexWrap="wrap" columnGap={2}>
-        {items.map(it => <Text key={it.name} size="footnote"><Text color={it.col}>■</Text><Text dimColor> {it.name}</Text></Text>)}
+        {items.map(it => <Text key={it.name} size="footnote"><Text color={it.col}>{it.glyph ?? '■'}</Text><Text dimColor> {it.name}</Text></Text>)}
       </Box>
     ) : null
     const section = (title: string, c: Chart | null) => c ? (

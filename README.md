@@ -18,9 +18,8 @@ A band above the prompt, in two sizes (Full and Mini):
 
 | Row | Shows |
 |-----|-------|
-| 7D / 5H | Share of each limit used, pace, and when it resets. Turns red with **runs out in** when it would hit 100% first. |
-| Last turn | Your last message and its full reply (subagents included) in % of 5H, what it would cost in a new session, and when a hand-off pays back. |
-| Next turn | What the next turn here should cost on your current model. |
+| 7D / 5H | Share of each limit used, pace, and when it resets, written inside each bar (on its own line in a terminal). Says **runs out in** when it would hit 100% first. In Mini, a limit that would run out turns from a bar into a ring with its percent and **out in** beside it. |
+| Last turn | Your last message and its full reply (subagents included) in % of 5H, what the next turn here should cost on your current model, what it would cost in a new session, and when a hand-off pays back. |
 | Turns | One bar per turn: grey for re-reading the conversation, violet for new work. |
 | Context | Context size, growth per turn, and turns until auto-compact. |
 | Cache | Prompt cache active (and when it expires) or expired, with the cost to re-cache. |
@@ -35,7 +34,7 @@ A **History** pane (the ▤ button on the band, or `/manapool history`), over 7,
 | Daily | Work per day, stacked by model, in % of 7D. |
 | 5H pace | This window against the middle half of your past windows, with a projection to 100%. |
 | 7D pace | This week against an even pace to 100% at reset, and last week (the middle half of past weeks once there are 3), with a projection. |
-| Limit size | Work per 1% of 5H, one dot per finished window, dated. A falling line is a shrinking limit. |
+| Limit size | Work per 1% of 5H, one dot per finished window, dated, violet above the median and coral below. A falling line is a shrinking limit. |
 | Limit by time | Work per 1% of 5H by weekday and 4-hour block, against your median: is the limit bigger at night, or on weekends? |
 | Projects | Work by the folder each session ran in. |
 | Hours | Work by weekday and hour of day. |

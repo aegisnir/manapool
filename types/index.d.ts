@@ -89,6 +89,10 @@ declare module 'claude-code' {
       busy: Shaped<boolean>
       // The History pane's range in days.
       range: Shaped<7 | 30 | 90>
+      // The spinner's frame (0 to 9) while a refresh runs; only the band reads it.
+      spin: Shaped<number>
+      // The History pane's copy of `view`, written at most every 5 minutes.
+      hist: Shaped<View | null>
     }
   }
 }
