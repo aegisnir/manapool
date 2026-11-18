@@ -82,7 +82,7 @@ claude plugin install manapool --marketplace aegisnir/manapool
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `aegisnir/manapool`, then **Add plugin**.
 
-To update: `/plugin update manapool`. To remove: `/plugin uninstall manapool`, then delete `~/.claude/plugins/data/manapool/` to remove its tick log and history too. Uninstalling does not refund any mana.
+To update: from a shell, `claude plugin update manapool@manapool`; in a session, `/plugin`, then **Installed**, Mana Pool, **Update now**. The new version loads in the next session, or after `/reload-plugins`. Plugins from third-party marketplaces don't update on their own; to turn that on: `/plugin`, then **Marketplaces**, manapool, **Enable auto-update**. To remove: `/plugin uninstall manapool`, then delete `~/.claude/plugins/data/manapool/` to remove its tick log and history too. Uninstalling does not refund any mana.
 
 ## How the estimates work
 

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
+All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
 ## 0.7.1 (2026-11-18)
 
