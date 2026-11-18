@@ -446,8 +446,7 @@ def tick_case(spec, start):
         smp.append({"at": t, "kind": "five_hour", "pct": pct, "resetsAt": res_})
     return files_, smp
 
-# 24. Model weights are measured after the token-type fit, not on list prices
-#     beside it.  The meter here counts a cache read 4x its list price and
+# 24. (0.5.x to 0.7.4) Model weights were measured after a token-type fit.  The meter here counts a cache read 4x its list price and
 #     treats Opus and Sonnet alike; each tick is 1,000 meter units.  Sonnet's
 #     ticks are read-heavy, Opus's are not.  Measured on list units, Sonnet
 #     would look ~1.6x Opus and pay the read factor twice.
@@ -459,10 +458,15 @@ for i in range(8):
     spec += [[("a.jsonl", "claude-opus-5-5", opus_t[i % 4])], [("a.jsonl", "claude-sonnet-5-5", son_t[i % 4])]]
 fl, smp = tick_case(spec, start)
 d = run(fl, [start], {"samples": smp, "ledger": []})
-check("token-type fit finds the 4x cache read", d["_fit"]["K"][3], 4.0, tol=0.01)
+# Since 0.8.0 token-type weights are not fitted (see scan.py: reads cannot
+# be told apart from the model weights on real data).  So K stays at list
+# even here, and the model weights carry the difference: the read-heavy
+# model (Sonnet) measures as pricier.  This is the known limitation the
+# manual's "How accurate" section states.
+check("token-type weights stay at list prices", d["_fit"]["K"], [1, 1, 1, 1])
 m = d["_fit"]["measured"]
-check("model fit: no premium where there is none (Sonnet/Opus measured)", m["sonnet"]["x"] / m["opus"]["x"], 1.0, tol=0.02)
-check("model fit: Sonnet used at 1.0x", d["_fit"]["MM"]["sonnet"], 1.0, tol=0.02)
+check("known limitation: a read-heavy model carries the read factor", m["sonnet"]["x"] > m["opus"]["x"], True)
+check("no R² is reported any more", "r2" in d["_fit"], False)
 
 # 25. Deleting one of two transcripts behind a tick keeps the complete copy.
 #     Opus ticks are split across a.jsonl and b.jsonl; Fable ticks are all in

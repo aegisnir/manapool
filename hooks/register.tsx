@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-18.10' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-18.11' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -1117,8 +1117,16 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
       const m = ms[k]
       L.push(`| ${cap(k)} | ${m ? `${m.x.toFixed(2)}x` : '-'} | ${fit.model_ticks[k] ?? 0} | ${(fit.MM[k] ?? 1).toFixed(2)}x | ${m?.lo != null && m.hi != null ? `${m.lo.toFixed(2)}x to ${m.hi.toFixed(2)}x` : m ? '-' : 'needs 3 ticks'} |`)
     }
-    L.push('', `Token-type weights: ${fit.source === 'fit' ? `fitted from ${fit.ticks} ticks (R² ${fit.r2})` : `list prices (a type fit needs 15+ clean ticks with R² 0.5 or better; now ${fit.ticks} ticks${fit.r2 !== null ? `, R² ${fit.r2}` : ''})`}. Fewer turns on a stronger model can still make it the cheaper pick for a task; this table cannot see that.`, '')
+    L.push('', `Token-type weights: list prices, not measured (see **How accurate**). ${fit.ticks} ticks this scan. Fewer turns on a stronger model can still make it the cheaper pick for a task; this table cannot see that.`, '')
   }
+
+  L.push('## How accurate', '')
+  L.push('Anthropic publishes none of this: how a plan weighs models and token types is not public. Every cost here is an estimate, built from two things that are measured (your transcripts and the meter) and one assumption (list prices as the starting point).')
+  L.push('- **The meter shows whole points only.** Most ticks move exactly 1 point, so a single tick can be off by up to a point. Only many ticks together say anything.')
+  L.push('- **Model weights are measured.** On one user\'s two weeks (41 windows, checked in November 2026 by a replay and an independent review), predicting each window\'s points from its work missed by about 28% at list prices and about 4 to 6% with the model weights, held out window by window. Rounding alone accounts for about 2%.')
+  L.push('- **Token-type weights are not.** Whether cache reads cost more or less than the price list says could not be told apart from the model weights: Fable work is mostly output, Opus work mostly re-reading, so "reads are cheap" and "Fable costs more" fit the meter equally well. Adding a read factor did not predict held-out windows better, so all token types stay at list prices. If reads really cost less than listed, the weight of a re-reading-heavy model (Opus) carries that, and long-session costs on another model are off by the same amount.')
+  L.push('- **Your numbers are your own.** The figures above are one person\'s; the table above shows yours, with each weight\'s 90% range. A model you rarely use (under a few ticks of work) stays at its list price.')
+  L.push('- **What it cannot see:** use elsewhere at the same moment as work here (it reads as a smaller limit), changes Anthropic makes to the plan between ticks, and anything about answer quality.', '')
 
   L.push('## How the costs are worked out', '')
   L.push('1. Every model call in the transcripts is priced in work units at the current weights.')

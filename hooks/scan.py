@@ -33,8 +33,10 @@ has no way to do that safely).
 
 Units: "work units" weigh each token by type and model, so a cheap cache read
 does not count like an expensive output token.  1 unit = one Sonnet input
-token at list price.  The weights start at API list prices and move toward
-what your own meter ticks measure, a little more with every tick.
+token at list price.  The per-model weights start at API list prices and
+move toward what your own meter ticks measure, a little more with every
+tick; the per-token-type weights stay at list prices (see "Token-type
+weights" below).
 """
 import csv, glob, hashlib, json, math, os, re, sys, time
 
@@ -310,8 +312,8 @@ DEFAULT = dict(NEWEST)
 
 
 def w(model_key, prompt, ver=None, fast=False):
-    """Unit weight per token type for one call on model_key (fitted weights).
-    Both cache-write kinds take the fitted cache-write factor K[2]."""
+    """Unit weight per token type for one call on model_key (model weight
+    applied; token types at list, K = 1).  Both cache-write kinds take K[2]."""
     base = price(model_key, ver or DEFAULT[model_key], prompt, fast)
     return [base[i] * K[i if i < 4 else 2] * MM[model_key] for i in range(5)]
 
@@ -864,33 +866,10 @@ if (key_of(cur_model), ver_of(cur_model)) in PRICES:
     DEFAULT[key_of(cur_model)] = ver_of(cur_model)
 
 # ---------------------------------------------------------------------------
-# Weight fit from real meter ticks (5H only: it moves often enough).
-# A tick = two readings in a row of the same window.  Its local work is every
-# call between the two readings.  Needs enough clean ticks to trust.
+# Meter ticks (5H only: it moves often enough).  A tick = two readings in a
+# row of the same window; its local work is every call between them.  They
+# feed the model weights below.
 # ---------------------------------------------------------------------------
-def solve3(A, b):
-    """Least squares for 3 unknowns, by the normal equations (no numpy here)."""
-    n = 3
-    M = [[sum(A[r][i] * A[r][j] for r in range(len(A))) for j in range(n)] for i in range(n)]
-    v = [sum(A[r][i] * b[r] for r in range(len(A))) for i in range(n)]
-    # Gaussian elimination with partial pivoting
-    for col in range(n):
-        piv = max(range(col, n), key=lambda r: abs(M[r][col]))
-        if abs(M[piv][col]) < 1e-30:
-            return None
-        M[col], M[piv] = M[piv], M[col]
-        v[col], v[piv] = v[piv], v[col]
-        for r in range(col + 1, n):
-            f = M[r][col] / M[col][col]
-            for c2 in range(col, n):
-                M[r][c2] -= f * M[col][c2]
-            v[r] -= f * v[col]
-    x = [0.0] * n
-    for r in range(n - 1, -1, -1):
-        x[r] = (v[r] - sum(M[r][c2] * x[c2] for c2 in range(r + 1, n))) / M[r][r]
-    return x
-
-
 def calls_between(a, b):
     # Calls with a < time <= b.  CALLS is sorted by time, so binary search
     # finds both ends directly instead of walking the whole list; this runs
@@ -1130,28 +1109,18 @@ for (kind_, ra), lst in WIN.items():
             n_calls += 1
         ticks.append((dp, x, per_model, a["at"], b["at"], n_calls))
 
-fit = {"source": "list", "ticks": len(ticks), "r2": None, "K": [1, 1, 1, 1], "MM": dict(MM), "model_ticks": {}}
+# Token-type weights (K) stay at list prices.  Up to 0.7.4 a fit tried to
+# measure them from single ticks, gated by R² 0.5; it never passed (894 of
+# 937 real ticks move exactly 1 point, so a tick holds no signal), and it
+# ignored the model weights, so on real data it would have priced cache reads
+# near 0.  A replay on whole windows (2026-11-18, checked independently)
+# found cache reads cannot yet be told apart from the model weights: Fable
+# work is mostly output, Opus work mostly reads, so "reads are cheap" and
+# "Fable costs more" explain the meter equally well, and adding K did not
+# predict held-out windows better.  K stays at 1.0 until that changes; the
+# manual and README say so (see "How accurate").
+fit = {"source": "list", "ticks": len(ticks), "K": [1, 1, 1, 1], "MM": dict(MM), "model_ticks": {}}
 usable = [t for t in ticks if sum(t[1]) > 0]
-if len(usable) >= 15:
-    A = [t[1] for t in usable]
-    b = [t[0] for t in usable]
-    x = solve3(A, b)
-    if x and all(v > 0 for v in x):
-        pred = [sum(A[r][i] * x[i] for i in range(3)) for r in range(len(A))]
-        mean = sum(b) / len(b)
-        ss_res = sum((b[r] - pred[r]) ** 2 for r in range(len(b)))
-        ss_tot = sum((v - mean) ** 2 for v in b) or 1e-9
-        r2 = 1 - ss_res / ss_tot
-        fit["r2"] = round(r2, 3)
-        if r2 >= 0.5:
-            # Keep output at list weight (the anchor) and scale the others by
-            # what the meter says they are worth relative to output.
-            K[1] = 1.0
-            K[2] = x[1] / x[0]
-            K[0] = K[2]
-            K[3] = x[2] / x[0]
-            fit["source"] = "fit"
-            fit["K"] = [round(v, 4) for v in K]
 # ---------------------------------------------------------------------------
 # Model multipliers: how much each model moves the 5H meter per list-price
 # unit, relative to your average tick (1.0x = what its list price says).
@@ -1272,7 +1241,7 @@ for k in MODELS:
                           "lo": round(math.exp(post - 1.645 * post_se), 3), "hi": round(math.exp(post + 1.645 * post_se), 3)}
 fit["MM"] = {k: round(v, 3) for k, v in MM.items()}
 if any(v != 1.0 for v in MM.values()):
-    fit["source"] = "fit" if fit["source"] == "fit" else "fit-models"
+    fit["source"] = "fit-models"
 
 # ---------------------------------------------------------------------------
 # Limit by time (the History pane): how much work 1% of 5H holds, by weekday

@@ -42,7 +42,7 @@ export type LedgerRow = {
   rule?: number  // the accounting rule it was built under (scan.py RULE)
 }
 export type Fit = {
-  source: string; ticks: number; r2: number | null; K: number[]; MM: Record<string, number>
+  source: string; ticks: number; K: number[]; MM: Record<string, number>
   model_ticks: Record<string, number>; kept?: number
   measured?: Record<string, { x: number; ticks: number; used: number; trust: number; lo: number; hi: number }>
 }

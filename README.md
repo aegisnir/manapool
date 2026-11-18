@@ -86,7 +86,7 @@ To update: from a shell, `claude plugin update manapool@manapool`; in a session,
 
 ## How the estimates work
 
-Anthropic does not publish how a subscription weighs different models and token types. Mana Pool asked. The answer was "plenty." So it starts from **one assumption: a plan weighs usage like the API price list.** As meter ticks build up, it measures how much each model moves the meter and shifts the weights toward that, a little more with every tick. Few ticks stay near list price; many ticks land on the measured value. Recent ticks count more, so it follows changes to the plan. The manual shows each model's measured weight, the weight in use and its 90% range. The numbers are estimates, not billing. The Keepers have the real ones and are not sharing.
+Anthropic does not publish how a subscription weighs different models and token types. Mana Pool asked. The answer was "plenty." So it starts from **one assumption: a plan weighs usage like the API price list.** As meter ticks build up, it measures how much each **model** moves the meter and shifts that model's weight toward it, a little more with every tick. Token types (output, cache writes, cache reads) stay at list prices: see **How accurate** below. Few ticks stay near list price; many ticks land on the measured value. Recent ticks count more, so it follows changes to the plan. The manual shows each model's measured weight, the weight in use and its 90% range. The numbers are estimates, not billing. The Keepers have the real ones and are not sharing.
 
 - Measured: token counts, replies, cache timing, conversation size, whole-number percents.
 - Estimated (marked `~`): the hundredths, every per-turn and per-model cost, the runway.
@@ -96,6 +96,16 @@ Anthropic does not publish how a subscription weighs different models and token 
 - It only sees Claude Code on the computer it runs on. Cloud sessions, claude.ai chat, the phone app and other computers also move the meter. They show as **elsewhere**: meter ticks with almost no work here behind them, weighed at that window's work per 1%. That includes use before the first reading of a window (a window starts at 0%) and 7D jumps of 2+ points while no session here read the meter. A day with no readings is marked not measured, not zero. Elsewhere use that runs at the same time as work here can't be told apart from a smaller limit, so it is not counted (the Limit check shows it as 1% buying less).
 
 List prices live in the `PRICES` table near the top of `hooks/scan.py`, one row per model version (Haiku 5.5's long-prompt price is in `LONG`). Update them when prices change.
+
+### How accurate
+
+Read every number Mana Pool shows as an estimate. This is what has been checked, and what has not.
+
+- **Ground truth is coarse.** The only thing measured on Anthropic's side is the meter, in whole points. Most ticks move exactly 1 point, so one tick can be off by up to a point; only many ticks together carry signal.
+- **Model weights: checked.** On one user's two weeks of data (41 five-hour windows, November 2026), each window's points were predicted from its work, holding out one window at a time. List prices alone missed by about 28%. With the measured model weights, about 4 to 6%. Rounding alone accounts for about 2%, so there is little left to gain. An independent review reproduced these figures.
+- **Token-type weights: not measured.** Whether a plan counts cache reads, cache writes and output in the same ratio as the price list could not be separated from the model weights: Fable work is mostly output and Opus work mostly re-reading, so "cache reads are cheap" and "Fable costs more" explain the meter equally well. A fitted read factor (best guess around 0.6x list, but anywhere from 0.44x to 1.07x, and different in each week) did not predict held-out windows better, so all token types stay at list prices. If reads really are cheaper, a re-reading-heavy model's weight absorbs the difference, and the cost of a long session switched to another model is off by about that much.
+- **One user, one computer, two weeks.** None of these figures is a measurement of how Anthropic weighs usage in general. Your own install measures your own weights; the manual shows them with a 90% range. A model with too little work to measure (Haiku here) stays at its list price.
+- **Not visible to it:** use elsewhere at the same moment as work here (it reads as a smaller limit), plan changes between ticks, and anything about answer quality.
 
 ## Privacy
 

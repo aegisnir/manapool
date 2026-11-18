@@ -2,6 +2,14 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.5 (2026-11-18)
+
+No number on the band changes.  The token-type fit is removed, and the README and manual now say how accurate the estimates are.
+
+- **Token-type weights stay at list prices, on purpose.**  Up to 0.7.4 a fit tried to measure how a plan weighs output, cache writes and cache reads, from single meter ticks.  It never switched on: most ticks move exactly 1 point, so its check could never pass.  It also ignored the model weights, so had it switched on it would have priced cache reads near zero.  A replay on two weeks of real data (41 windows), checked by an independent review, found cache reads cannot yet be told apart from the model weights, and adding a read factor did not predict held-out windows better.  The fit is gone, and `_fit` no longer carries `r2`.
+- **"How accurate" in the README and the manual.**  What is measured (the meter, in whole points; your transcripts), what is estimated, how well the model weights predict the meter on held-out windows (about 4 to 6% off, against about 28% for list prices alone, with about 2% from rounding), what is not measured (token types), and what the figures do not show (one user, one computer, two weeks).
+- **Checked on real data:** every weight, cost, Limit check and turn the scanner reports is identical to 0.7.4.
+
 ## 0.7.4 (2026-11-18)
 
 The rest of the 0.7.1 review: one runs-out alert across sessions, costs from the right rate, Mythos priced.
