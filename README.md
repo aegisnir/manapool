@@ -80,7 +80,7 @@ Answer `y` to add the marketplace, then pick a scope (user scope loads it in eve
 claude plugin install manapool --marketplace aegisnir/manapool
 ```
 
-In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `aegisnir/manapool`, then **Add plugin**.
+In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Add plugins**, add the marketplace `aegisnir/manapool`, and install Mana Pool from it.
 
 To update: from a shell, `claude plugin update manapool@manapool`; in a session, `/plugin`, then **Installed**, Mana Pool, **Update now**. The new version loads in the next session, or after `/reload-plugins`. Plugins from third-party marketplaces don't update on their own; to turn that on: `/plugin`, then **Marketplaces**, manapool, **Enable auto-update**. To remove: `/plugin uninstall manapool`, then delete `~/.claude/plugins/data/manapool/` to remove its tick log and history too. Uninstalling does not refund any mana.
 
@@ -91,7 +91,7 @@ Anthropic does not publish how a subscription weighs different models and token 
 - Measured: token counts, replies, cache timing, conversation size, whole-number percents.
 - Estimated (marked `~`): the hundredths, every per-turn and per-model cost, the runway.
 - The cache time-to-live is assumed to be 60 minutes. A cache belongs to one model, so switching models starts cold.
-- Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. A model the table does not know is left out and named in the manual, never guessed (Mythos too, until its price is added).
+- Prices: each call at its exact model version, cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x), fast mode 2x, Haiku 5.5 prompts over 100k at its higher tier. Mythos 5, 5.1 and 5.2 are priced like Fable of the same version, as on Anthropic's pricing page. A model the table does not know (Mythos Preview, for one) is left out and named in the manual, never guessed.
 - History: work is weighed at plain list prices (the same fixed weights as the ledger), and turned into % of 7D with the current 7D window's work per 1%. Re-reading counts cache reads. Days and hours are local time. Over 30 or 90 days a project can pass 100%: that is more than one week's limit.
 - It only sees Claude Code on the computer it runs on. Cloud sessions, claude.ai chat, the phone app and other computers also move the meter. They show as **elsewhere**: meter ticks with almost no work here behind them, weighed at that window's work per 1%. That includes use before the first reading of a window (a window starts at 0%) and 7D jumps of 2+ points while no session here read the meter. A day with no readings is marked not measured, not zero. Elsewhere use that runs at the same time as work here can't be told apart from a smaller limit, so it is not counted (the Limit check shows it as 1% buying less).
 

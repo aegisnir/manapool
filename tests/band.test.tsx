@@ -190,3 +190,24 @@ test('a full store does not stop the refresh', async ($, on) => {
   expect(written.some(v => /storage is full/.test(String(v.error)))).toBe(true)
   expect(written.some(v => /Error/.test(String(v.error)))).toBe(false)
 })
+
+// A4: at 100% the 5H limit is reached; it never says "runs out in 0m".
+for (const mode of ['full', 'mini'] as const) {
+  test(`${mode}: at 100% it says limit reached`, async ($, on) => {
+    const ra = iso(NOW + 2 * 3600e3), s = NOW / 1000
+    seed(on, viewOf(100, 30, { samples: [{ at: s - 1800, kind: 'five_hour', pct: 90, resetsAt: ra }, { at: s - 60, kind: 'five_hour', pct: 100, resetsAt: ra }] }), mode)
+    const ui = await $.ui.mount(BAND('terminal'))
+    const w = await words(ui)
+    expect(w).toMatch(/limit reached/)
+    expect(w).not.toMatch(/0m/)
+    await ui.unmount()
+  })
+}
+
+// Mythos 5.2 is priced: on it, the Cost pill is not "Unpriced".
+test('Mythos 5.2 is priced on the band', async ($, on) => {
+  seed(on, viewOf(12, 30, { model: 'claude-mythos-5-2' }))
+  const ui = await $.ui.mount(BAND('terminal'))
+  expect(await words(ui)).not.toMatch(/Unpriced|unpriced/)
+  await ui.unmount()
+})

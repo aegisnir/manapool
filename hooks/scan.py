@@ -90,6 +90,7 @@ from datetime import datetime, timedelta, timezone
 # ---------------------------------------------------------------------------
 starts, session_id, since5h, now, busy, export = [], "", 0.0, 0.0, False, ""
 backfill = False  # --backfill: build the daily history from every transcript once (slow; run in the background)
+claim = ""  # --claim=<name>|<value>: claim a once-only alert across sessions (see below)
 cur_model, data_dir, readings = "", "", []
 # Claude Code's own folder: ~/.claude, or wherever CLAUDE_CONFIG_DIR points.
 CONFIG = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
@@ -114,12 +115,47 @@ for a in sys.argv[1:]:
         busy = a.split("=", 1)[1] == "1"
     elif a == "--backfill":
         backfill = True
+    elif a.startswith("--claim="):
+        claim = a.split("=", 1)[1]
     elif a.startswith("--export="):
         export = os.path.expanduser(a.split("=", 1)[1])
     else:
         starts.append(float(a))
 if not now:
     now = datetime.now(timezone.utc).timestamp()
+
+# --claim=<name>|<value>: a once-only alert (the 5H "runs out" notification,
+# once per window) claimed across every open session.  Under the shared file
+# lock: read claims.json, and if <name> already holds <value> another session
+# sent it ("claimed": false); otherwise write it and this session sends it.
+# The mod's own store has no way to check and write in one step, so two
+# sessions could both see "not sent yet" and both notify.  Returns before
+# any transcript is read: a few milliseconds.
+if claim:
+    name_, _, value_ = claim.partition("|")
+    got_ = False
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
+        cf = os.path.join(data_dir, "claims.json")
+        with open(os.path.join(data_dir, "lock"), "a+") as lk:
+            lock(lk)
+            try:
+                try:
+                    with open(cf) as f:
+                        held = json.load(f)
+                except Exception:
+                    held = {}
+                if held.get(name_) != value_:
+                    held[name_] = value_
+                    tmp = f"{cf}.{os.getpid()}.tmp"
+                    with open(tmp, "w") as f:
+                        json.dump(held, f)
+                    os.replace(tmp, cf)
+                    got_ = True
+            finally:
+                unlock(lk)
+    print(json.dumps({"claimed": got_}))
+    sys.exit(0)
 
 try:
     given = json.loads(sys.stdin.read() or "{}")
@@ -155,13 +191,17 @@ SPAN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 # ---------------------------------------------------------------------------
 # Weights.  List prices per model VERSION in $ per million tokens: input,
 # output, cache write (1-hour kind), cache read.  Source: Anthropic's pricing
-# page, platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-09).
+# page, platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-09;
+# Mythos added 2026-11-18: each version at its Fable twin's price).
 # Versions of one family can differ a lot (Fable 5.2 is 20% cheaper than 5.1,
 # Sonnet 5.5 reads cache at half Sonnet 5's price), so each call is priced on
 # the exact version it ran on.
 # Units: dollars divided by $2 (Sonnet 5.5 input), so 1 unit = 1 Sonnet input token.
 # ---------------------------------------------------------------------------
 PRICES = {
+    ("mythos", "5.2"): (8, 40, 16, 0.20),
+    ("mythos", "5.1"): (10, 50, 20, 0.25),
+    ("mythos", "5"): (10, 50, 20, 1.00),
     ("fable", "5.2"): (8, 40, 16, 0.20),
     ("fable", "5.1"): (10, 50, 20, 0.25),
     ("fable", "5"): (10, 50, 20, 1.00),
@@ -192,9 +232,9 @@ FAST = 2.0
 LONG = {("haiku", "5.5"): (100_000, 5.0)}
 # The version to assume when a model id names no known version, and for
 # "what if this ran on Fable" before you have used that family yourself.
-NEWEST = {"fable": "5.2", "opus": "5.5", "sonnet": "5.5", "haiku": "5.5"}
+NEWEST = {"mythos": "5.2", "fable": "5.2", "opus": "5.5", "sonnet": "5.5", "haiku": "5.5"}
 UNIT_DOLLARS = 2.0
-MODELS = ["fable", "opus", "sonnet", "haiku"]
+MODELS = ["mythos", "fable", "opus", "sonnet", "haiku"]
 # A fresh session that takes over through a handoff note does not start from
 # the bare system prompt: it also reads the note and re-reads a few files.
 # Assumed allowance, in tokens (see the manual: "fresh session").
@@ -205,12 +245,11 @@ HANDOFF_NOTE_OUT = 3000
 
 def key_of(model):
     m = (model or "").lower()
-    # Mythos has no list price yet: it is left out and listed, like any
-    # unknown model, never priced as Fable.  When its price is published, add
-    # ("mythos", <version>) rows to PRICES, "mythos" to NEWEST and MODELS, and
-    # return "mythos" here.
+    # Mythos is priced per version (5, 5.1, 5.2).  A Mythos with no listed
+    # price (Mythos Preview, a newer version) is left out and listed, like any
+    # unknown model, never priced as Fable or as another version.
     if "mythos" in m:
-        return ""
+        return "mythos" if ("mythos", ver_of(m)) in PRICES else ""
     if "fable" in m:
         return "fable"
     if "opus" in m:
@@ -1535,6 +1574,13 @@ if starts and since5h:
     chk = {"per1": round(per1_now) if per1_now else None, "pct": cur_pct, "herePct": cur_pct - odd_now, "lo": round(lo_) if lo_ else None, "hi": round(hi_) if hi_ else None, "n": len(vals), "weights": fit["source"],
            "outside": odd_now}
 out["_check"] = chk
+# % of 5H per work unit for the band's costs: the points the work here moved,
+# over that work counted up to the newest reading (the ledger's rule).  Work
+# after the reading has not shown on the meter yet; counting it made every
+# cost read low.  None under 3 points: too coarse (the mod keeps its last one).
+out["_rate5"] = None
+if chk and cur and chk["herePct"] >= 3 and cur["units"] > 0:
+    out["_rate5"] = chk["herePct"] / cur["units"]
 
 # Elsewhere per day, in history.json:
 #   e: elsewhere list units: each elsewhere tick's % moved times its

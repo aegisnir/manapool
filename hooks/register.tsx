@@ -6,7 +6,7 @@ import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../type
 // The slash command and the side pane's id.
 const CMD = 'manapool'
 const PANE = 'manapool'
-const BUILD = '2026-11-18.9' // bump on each edit: the store's `loaded` key shows which build is running
+const BUILD = '2026-11-18.10' // bump on each edit: the store's `loaded` key shows which build is running
 const view = atom({ plugin: 'manapool', key: 'view' } as const, null, { shape: 'view-3' })
 const mode = atom({ plugin: 'manapool', key: 'mode' } as const, 'full', { shape: 'mode-3' })
 const lastReply = atom({ plugin: 'manapool', key: 'lastReply' } as const, null, { shape: 'last-3' })
@@ -43,7 +43,7 @@ const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 // in use (per model version, moved toward your own meter ticks as they build
 // up); this is only the fallback before the first scan.
 const LISTW: Record<string, number[]> = {
-  fable: [4, 20, 8, 0.1], opus: [2, 10, 4, 0.1], sonnet: [1, 5, 2, 0.05], haiku: [0.05, 0.25, 0.1, 0.005],
+  mythos: [4, 20, 8, 0.1], fable: [4, 20, 8, 0.1], opus: [2, 10, 4, 0.1], sonnet: [1, 5, 2, 0.05], haiku: [0.05, 0.25, 0.1, 0.005],
 }
 // Saved per-session entries (ses:<id>, alerts:<id>) are dropped after this
 // long unused.  The whole store is capped at 4 MiB by Claude Code.
@@ -83,8 +83,9 @@ const pctTxt = (x: number) => (x < 0.005 ? '<0.01%' : x < 0.1 ? `${x.toFixed(2)}
 const cap = (k: string) => k.charAt(0).toUpperCase() + k.slice(1)
 const keyOf = (id: string) => {
   const m = (id || '').toLowerCase()
-  // Mythos has no list price yet: unpriced like any unknown model (see scan.py key_of).
-  return m.includes('mythos') ? '' : m.includes('fable') ? 'fable' : m.includes('opus') ? 'opus' : m.includes('haiku') ? 'haiku' : m.includes('sonnet') ? 'sonnet' : ''
+  // Mythos is priced per version (5, 5.1, 5.2, as Fable); one with no listed
+  // price (Mythos Preview) stays unpriced like any unknown model (scan.py key_of).
+  return m.includes('mythos') ? (['5', '5.1', '5.2'].includes(verOf(id)) ? 'mythos' : '') : m.includes('fable') ? 'fable' : m.includes('opus') ? 'opus' : m.includes('haiku') ? 'haiku' : m.includes('sonnet') ? 'sonnet' : ''
 }
 // "claude-haiku-4-5-20251001" -> "4.5" (same rule as scan.py's ver_of)
 const verOf = (id: string) => {
@@ -242,6 +243,8 @@ const derive = (v: View, last: number | null, now: number) => {
   const runway = (w: Win): Runway => {
     const r = pace(w)
     const resetMs = w.resetsAt ? Date.parse(w.resetsAt) - now : (SPAN[w.kind] ?? 0) * 1000
+    // At 100% the limit is already reached: "runs out in 0m" said it wrong.
+    if (est(w) >= 100) return { r, text: 'limit reached', bad: true, leftMs: 0 }
     if (r <= 0) return { r, text: 'no pace yet', bad: false, leftMs: Infinity }
     const leftMs = ((100 - est(w)) / r) * 3600e3
     return leftMs >= resetMs ? { r, text: 'lasts until reset', bad: false, leftMs } : { r, text: `runs out in ${dur(leftMs)}`, bad: true, leftMs }
@@ -728,7 +731,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const usual = past.length >= 3 ? quant(past.map(([ra, ss]) => at(ss, startOf(ra), nowMin)), 0.5) : null
     pace = {
       svg: svgDoc(H, out), alt: `5H window at ${Math.round(pctNow)}%${usual !== null ? `, usual ${Math.round(usual)}% by now` : ''}`,
-      right: rw.bad ? `Runs out in ${dur(rw.leftMs)}` : usual !== null ? `Usual ${Math.round(usual)}% by now` : `${past.length} past windows`,
+      right: rw.bad ? (rw.leftMs <= 0 ? 'Limit reached' : `Runs out in ${dur(rw.leftMs)}`) : usual !== null ? `Usual ${Math.round(usual)}% by now` : `${past.length} past windows`,
       rightBad: rw.bad,
       legend: [{ name: 'This window', col: ME }, ...(past.length >= 3 ? [{ name: `Usual (middle half of ${past.length} windows)`, col: HIST }] : [])],
     }
@@ -810,7 +813,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const usual = p50.length ? quant(full.map(([ra, ss]) => at(ss, startOf(ra), nowD)), 0.5) : null
     pace7 = {
       svg: svgDoc(H, out), alt: `7D window at ${Math.round(pctNow)}%, even pace ${Math.round(even)}% by now${usual !== null ? `, usual ${Math.round(usual)}%` : ''}`,
-      right: rw.bad ? `Runs out in ${dur(rw.leftMs)}` : usual !== null ? `Usual ${Math.round(usual)}% by now` : `Even pace ${Math.round(even)}% by now`,
+      right: rw.bad ? (rw.leftMs <= 0 ? 'Limit reached' : `Runs out in ${dur(rw.leftMs)}`) : usual !== null ? `Usual ${Math.round(usual)}% by now` : `Even pace ${Math.round(even)}% by now`,
       rightBad: rw.bad,
       legend: [{ name: 'This week', col: ME },
         ...(p50.length ? [{ name: `Usual (middle half of ${full.length} weeks)`, col: HIST }] : showLast ? [{ name: 'Last week', col: HIST }] : []),
@@ -1039,7 +1042,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Turns**: one small bar per turn of this whole session: grey is the part spent **re-reading** the old conversation, violet the **new work**. Dim bars were before the current 5H window started (a thin line marks its start). Then the turn count, how much of the 5H limit this session has **used** since the window began, and its share of **last hour\'s use** (everything Claude Code used on this computer in the last hour, subagents included). Open the band in each session to see which one uses the most.')
   L.push('- **Context**: context size, how much of the window is used, how much it grows per turn, and how close auto-compact is, with the **Context pill**: a warning that the session is getting long enough for the model to lose track of earlier detail.')
   L.push('- **Cache**: the prompt cache clock. **Active** means the conversation is still in the prompt cache, so the next message reads it cheaply (a *cache read*). An hour after the last reply the cache **expires**, and the next message here costs extra to re-cache the whole conversation (a *cache write*), once. A cache belongs to one model: after switching models it shows **Model changed**, and the next message pays that re-cache too.')
-  L.push('- **Limit check** (once past windows are recorded): how much work 1% of the 5H limit buys in this window, against the usual amount. **Normal** within 15% of usual; red when it buys 15%+ less (a shrinking limit), or when the meter moved with no Claude Code use on this computer (**elsewhere**: see below). "Work" is usage weighted by token type and model; see "Limit audit". Points moved elsewhere are left out: work per 1% is the work here over the points it moved, so a window used partly in the cloud does not also read as a smaller limit. The **elsewhere** points of this window show on this row (and in Mini and the `/manapool` summary) whenever above 0, before there are past windows to compare with too.')
+  L.push('- **Limit check** (once past windows are recorded): how much work 1% of the 5H limit buys in this window, against the usual amount: halfway between the 25th and 75th percentile of finished 5H windows that reached 20% (with under 4 such windows, halfway between the lowest and highest). **Normal** within 15% of usual; red when it buys 15%+ less (a shrinking limit), or when the meter moved with no Claude Code use on this computer (**elsewhere**: see below). "Work" is usage weighted by token type and model; see "Limit audit". Points moved elsewhere are left out: work per 1% is the work here over the points it moved, so a window used partly in the cloud does not also read as a smaller limit. The **elsewhere** points of this window show on this row (and in Mini and the `/manapool` summary) whenever above 0, before there are past windows to compare with too.')
   L.push('- **Other models**: one column for each model you are not on, and two ways to move to it, each shown as a one-time cost, then the cost per turn after it. **Switch now**: this session changes model, so the whole conversation is cached on the new model once, and every later turn still re-reads it. **Hand off**: write a hand-off note here and start a new session on that model; it caches only its small start, and its turns carry no old conversation. Per-turn costs are the last 3 turns re-priced on that model (assuming it would use the same tokens: Fable tends to think more, Haiku to write less). Green marks the cheaper path over the next 5 turns. As a session grows, switching now costs more and handing off costs less.')
   L.push('- **▤ / ⓘ / ⊖ / ⊕**: the History pane / this manual / Mini (one line) / back to Full. Mini shows the bars with their percent inside, **elsewhere** when above 0, the last turn as a pill coloured by whichever of Cost and Context is worse (a dotted border for amber, dashed for red), and the cache clock.', '')
 
@@ -1078,7 +1081,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   }
 
   L.push('## Limit audit', '')
-  L.push('Anthropic does not say how much work a 5H or 7D window holds. The **ledger** keeps one row per finished window, forever, so a shrinking limit shows up as a drop in **work units per 1%**. `/manapool export` writes it as a CSV (`~/Documents/Mana Pool/manapool-ledger.csv`).', '')
+  L.push('Anthropic does not say how much work a 5H or 7D window holds. The **ledger** keeps one row per finished window, the newest 3,000 (well over a year of heavy use), so a shrinking limit shows up as a drop in **work units per 1%**. `/manapool export` writes it as a CSV (`~/Documents/Mana Pool/manapool-ledger.csv`).', '')
   L.push('- **Work units** weigh each token by type and model at API list prices for the exact model version, 1 unit = one Sonnet 5.5 input token. Raw token counts mislead: a cache-read token costs 1/50 to 1/200 of an output token, so light work in a long session looks huge in raw tokens. The ledger always uses plain list weights, so rows stay comparable even when the cost weights below are re-fitted.')
   L.push('- **Elsewhere**: points the meter moved with almost no work on this computer behind them (under a quarter of a usual point). Cloud sessions, claude.ai chat, the phone app and other computers share the limit but write nothing here. Only such ticks count: elsewhere use that runs alongside work here moves the meter the same way a smaller limit would, so it shows in the limit check as buying less, not here. A window starts at 0%, so use before the first reading here (a cloud session while no session was open) counts too. A whole 5H window used elsewhere that resets before a session here reads the meter shows only on 7D: a 7D jump of 2+ points with almost no work here, less what 5H ticks already counted, counts as well. A tick only counts when this computer was quiet around it: the meter lags the work and shows whole points, so the work of the 15 minutes before a tick counts towards it, plus under a point of rounding from earlier. Use elsewhere at the same time as work here can\'t be told from that lag. On 7D, where every quiet night ticks 1 point, it takes 2. Elsewhere ticks are left out of the model weights. Each point is weighed at the window\'s work here over the points that work moved; a window with under 3 such points borrows the usual figure. Remote Control sessions run on this computer and are counted as work here.')
   L.push('- **Meter** is the last reading seen in that window. If no session was open near its end, the true final figure may be a little higher.', '')
@@ -1128,15 +1131,15 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('## Accuracy', '')
   L.push('- **Measured:** token counts, calls, turns, subagents, context size, cache timing, auto-compacts, the whole-number percents.')
   L.push('- **Estimated:** the hundredths, the pace and runway, every % of a turn or a switch (they rest on the rate and the weights), the new-session price (it assumes the hand-off allowance).')
-  L.push('- **Prices:** each call at its exact model version; cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x input); fast mode 2x (forecasts on a model in fast mode are priced fast too: next turn, re-cache, hand-off; other models at standard speed); Haiku 5.5 prompts over 100k at its higher tier.')
+  L.push('- **Prices:** each call at its exact model version (Mythos 5, 5.1 and 5.2 at the price of Fable of the same version; Mythos Preview has no listed price and is left out); cache writes by lifetime (1-hour kind 2x input, 5-minute kind 1.25x input); fast mode 2x (forecasts on a model in fast mode are priced fast too: next turn, re-cache, hand-off; other models at standard speed); Haiku 5.5 prompts over 100k at its higher tier.')
   const unp = Object.entries(v?.unpriced ?? {})
   if (unp.length) L.push(`- **Not priced:** ${unp.map(([m, n]) => `${m} (${n} calls)`).join(', ')}. Not in the price table, so left out of every figure.`)
   L.push('- **Not counted:** claude.ai chat and the phone app\'s own chats move the meter but write nothing on this computer.', '')
 
   L.push('## Where things live', '')
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
-  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock; 5H readings kept 30 days, 7D readings 120), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript\'s full path and the full path of the folder each session ran in), `ticks.json` (each meter tick\'s percent and work per model, kept 180 days) `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days), and while the one-time history backfill is unfinished `backfill.lock` (one backfill at a time across sessions) and `backfill.json` (failures so far and when the next try may start: the wait doubles from 1 minute to a day); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts, times, model names and file paths; no conversation text.')
-  L.push('- **Refreshes:** about 1.5 seconds after each turn; after a meter tick or a context change too, but at most once every 20 seconds (otherwise within 30 seconds); every 2 minutes when nothing happens. The cache clock redraws every 30 seconds.')
+  L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock; 5H readings kept 30 days, 7D readings 120), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript\'s full path and the full path of the folder each session ran in), `ticks.json` (each meter tick\'s percent and work per model, kept 180 days) `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days), and while the one-time history backfill is unfinished `backfill.lock` (one backfill at a time across sessions) and `backfill.json` (failures so far and when the next try may start: the wait doubles from 1 minute to a day), and `claims.json` (which 5H window the runs-out alert was last sent for, so only one session sends it); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts, times, model names and file paths; no conversation text.')
+  L.push('- **Refreshes:** only once the band or a pane has been shown, or after `/manapool` (sessions that never show it, such as `claude -p` runs, read nothing); then about 1.5 seconds after each turn; after a meter tick or a context change too, but at most once every 20 seconds (otherwise within 30 seconds); every 2 minutes when nothing happens. The cache clock redraws every 30 seconds.')
   L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} history\` opens the History pane (also the ▤ button on the band). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
   return L.join('\n')
 }
@@ -1203,6 +1206,8 @@ export const register: Register = on => {
   let alerts: AlertState | undefined
   let backfilling = false  // the one-time history backfill is running
   let storeFull = false    // a store write was refused even after pruning
+  let lastSavedKey = ''    // the meters as of the last 'last' write (see refresh)
+  let lastSavedAt = 0
   let wallSent = ''        // the 5H window this session already sent the runs-out alert for
   let bfRetryAt = 0        // ms: another session was on it (busy); look again after this
   // Scans and store writes wait for the first draw of the band or a pane, or
@@ -1292,13 +1297,16 @@ export const register: Register = on => {
     if (w5 && w5.resetsAt) {
       const rw = d.runway(w5)
       if (rw.bad && rw.leftMs <= WALL_MS) {
-        const done = await io.get('wall5h').catch(() => null)
-        // wallSent: once here even when the store refuses the claim below,
-        // or a full store would re-send the alert on every refresh
-        if (done !== w5.resetsAt && wallSent !== w5.resetsAt) {
+        // Claimed across sessions in one locked step (scan.py --claim), so two
+        // sessions can't both see "not sent yet" and both notify.  wallSent
+        // keeps this session from asking again for the same window.
+        if (wallSent !== w5.resetsAt) {
           wallSent = w5.resetsAt
-          await save(io, 'wall5h', w5.resetsAt, now) // claim it first, so other sessions stay quiet
-          const text = `5H runs out in ~${dur(rw.leftMs)} at this pace (resets ${clock(Date.parse(w5.resetsAt))}).`
+          const won = await io.scan([`--claim=wall5h|${w5.resetsAt}`], '{}', 15000)
+            .then(r => r.exitCode === 0 && JSON.parse(r.stdout).claimed === true).catch(() => false)
+          if (!won) return
+          const resets = clock(Date.parse(w5.resetsAt))
+          const text = rw.leftMs <= 0 ? `5H limit reached (resets ${resets}).` : `5H runs out in ~${dur(rw.leftMs)} at this pace (resets ${resets}).`
           io.toast(text)
           const how = await wallNotify(io, text)
           await save(io, 'wall5hHow', { at: now, how }, now)
@@ -1421,11 +1429,11 @@ export const register: Register = on => {
       // chat, phone) are in the meter but not in the work, and would make
       // every cost on the band read high (a window run to 30% in the cloud
       // and 35% in all would price each turn here 7x).
-      const else5 = (sums._check as Check | null)?.outside ?? 0
-      const here5 = w5 ? w5.pct - else5 : 0
-      const fresh5 = w5 && here5 >= 3 && w5.tokens.units > 0 ? here5 / w5.tokens.units : undefined
+      // scan.py's _rate5 counts the work only up to the newest reading (work
+      // after it has not shown on the meter yet, and made costs read low).
+      const fresh5 = typeof sums._rate5 === 'number' && sums._rate5 > 0 ? (sums._rate5 as number) : undefined
       const rate = fresh5 ?? saved
-      if (fresh5) await save(io, 'rate', fresh5, nowMs)
+      if (fresh5 && fresh5 !== saved) await save(io, 'rate', fresh5, nowMs)
       const nv: View = {
         wins, samples, updatedAt: now, ctx, model, rate,
         // auto-compact switched off: no trigger point, so no "auto-compact in N turns"
@@ -1444,8 +1452,13 @@ export const register: Register = on => {
         await io.hist(() => nv)
       }
       // So the next session (and this one after a reload) can draw at once.
-      const curSamples = samples.filter(s => wins.some(w => w.kind === s.kind && w.resetsAt === s.resetsAt))
-      await save(io, 'last', { ...nv, samples: curSamples, session: undefined }, nowMs)
+      // Written when a meter moves or a window resets, else every 5 minutes at
+      // most: it holds the History days too, and was rewritten on every refresh.
+      const lastKey = wins.map(w => `${w.kind}|${w.resetsAt}|${w.pct}`).join(',')
+      if (lastKey !== lastSavedKey || nowMs - lastSavedAt >= HIST_EVERY_MS) {
+        const curSamples = samples.filter(s => wins.some(w => w.kind === s.kind && w.resetsAt === s.resetsAt))
+        if (await save(io, 'last', { ...nv, samples: curSamples, session: undefined }, nowMs)) { lastSavedKey = lastKey; lastSavedAt = nowMs }
+      }
       if (sid) await save(io, `ses:${sid}`, { session: nv.session, at: now }, nowMs)
       await runAlerts(io, nv, nowMs)
       // The band is up to date, but not everything was kept (see save).
@@ -1594,7 +1607,9 @@ export const register: Register = on => {
     const last = (await read($, lastReply)) ?? (v?.session?.lastSeen ? v.session.lastSeen * 1000 : null)
     if (!v || v.wins.length === 0) return { text: 'No limit data yet. Send a message first.' }
     return { text: summaryText(v, last, await $.clock.now()) }
-  })
+  // A thrown error here would leave the command unanswered (the validator
+  // flags a command hook with no handler): answer with a plain line instead.
+  }).catch(() => ({ text: 'Mana Pool could not answer. Try again in a moment.' }))
 
   // `/clear` ends this conversation and the process goes on under a new
   // session id (no new session.start).  The old reply time and turn history
@@ -1801,7 +1816,7 @@ export const register: Register = on => {
       // and last "runs out in" shortens to "out in".  The 5H meter always stays.
       const barCells = Svg ? MINI_W / 8.8 : Math.ceil(MINI_W / 8.8)
       const ringMode = !!Svg && !!rw5?.bad
-      const runTxt = (short: boolean) => (rw5?.bad ? `${short ? ' out in' : ' runs out in'} ${dur(rw5.leftMs)}` : '')
+      const runTxt = (short: boolean) => (!rw5?.bad ? '' : rw5.leftMs <= 0 ? ' limit reached' : `${short ? ' out in' : ' runs out in'} ${dur(rw5.leftMs)}`)
       const ringTxt = (w: Win) => `${d.est(w).toFixed(1)}%`
       const cacheTxt = d.idle === null ? '' : d.warm ? dur(TTL_MS - d.idle) : d.otherModel ? 'Cold' : 'Expired'
       // Points of 5H moved elsewhere (cloud, chat, phone): shown whenever above 0.

@@ -2,6 +2,18 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.4 (2026-11-18)
+
+The rest of the 0.7.1 review: one runs-out alert across sessions, costs from the right rate, Mythos priced.
+
+- **Costs no longer read low.**  The rate that turns work into % of 5H divided the meter by all the work so far, including work after the newest reading that had not shown on the meter yet.  It now counts work up to that reading, as the ledger does.  On one real window the old rate was 12% low, so every cost on the band read about 12% under.
+- **One "runs out" alert across sessions.**  The once-per-window notification was claimed by reading the store and then writing it, so two sessions could both see "not sent yet" and both notify.  It is now claimed in one locked step (`claims.json` next to the tick log).
+- **"Limit reached" at 100%.**  The band, the pace charts and the alert said "runs out in 0m"; they now say the limit is reached.
+- **Mythos is priced.**  Mythos 5, 5.1 and 5.2 cost what Fable of the same version costs on Anthropic's pricing page (checked 2026-11-18), so their work now counts in the meters, the ledger and the History pane.  Mythos Preview has no listed price and stays out, named in the manual.
+- **Fewer store writes.**  The saved snapshot the next session draws from (it holds the History days too) was rewritten on every refresh; now only when a meter moves or a window resets, else every 5 minutes at most.  The rate is written only when it changes.
+- **`/manapool` always answers.**  An error in the command now gives a plain line instead of no answer.
+- **Manual and README.**  The ledger keeps the newest 3,000 windows, not every one; the Limit check's "usual" is defined (halfway between the 25th and 75th percentile); refreshes start once the band is shown; Mythos pricing; the desktop install step (**+**, then **Add plugins**).
+
 ## 0.7.3 (2026-11-18)
 
 A full store no longer stops the band, and the plugin passes the strict check.

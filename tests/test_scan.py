@@ -347,7 +347,7 @@ shutil.rmtree(home)
 # ---------------- daily history (the History pane) ----------------
 # 23. Days the scan covers are rebuilt each scan; older days come only from
 #     the backfill and survive later scans.  A reply logged twice counts once,
-#     the project is the session's folder.  Mythos has no price yet: it is
+#     the project is the session's folder.  Mythos Preview has no price: it is
 #     left out and listed as unpriced, never priced as Fable.
 def with_cwd(rec, cwd):
     return dict(rec, cwd=cwd)
@@ -364,7 +364,7 @@ new_t = NOW - 600
 write(home, "old.jsonl", [with_cwd(asst(old_t, "o1", "claude-sonnet-5-5", i=1000), "/x/alpha")], old_t + 10)
 write(home, "new.jsonl", [with_cwd(asst(new_t, "n1", "claude-opus-5-5", i=100, r=1000), "/x/beta"),
                           with_cwd(asst(new_t + 1, "n1", "claude-opus-5-5", i=100, r=1000), "/x/beta"),  # streamed copy
-                          with_cwd(asst(new_t + 5, "n2", "claude-mythos-5", i=10), "/x/beta"),
+                          with_cwd(asst(new_t + 5, "n2", "claude-mythos-preview", i=10), "/x/beta"),
                           with_cwd(asst(new_t + 6, "n3", "claude-opus-5-5", i=10), "/x/beta/.claude/worktrees/wt1")],
       new_t + 10)
 d = run_in(home, [NOW - 3 * 86400, f"--now={NOW}", f"--data-dir={dd}"])
@@ -375,8 +375,8 @@ b = h["days"].get(local_day(new_t), {"m": {}, "p": {}, "r": 0, "n": 0})
 # opus 5.5: input 4/2 = 2 units, cache read 0.2/2 = 0.1 unit per token
 check("history: streamed reply counted once", b["m"].get("opus"), 100 * 2 + 1000 * 0.1 + 10 * 2)
 check("history: re-reading = cache reads", b["r"], 100)
-check("history: Mythos not priced as Fable", ("mythos" in b["m"], "fable" in b["m"]), (False, False))
-check("history: Mythos listed as unpriced", d["_unpriced"].get("claude-mythos-5"), 1)
+check("history: Mythos Preview not priced as Fable", ("mythos" in b["m"], "fable" in b["m"]), (False, False))
+check("history: Mythos Preview listed as unpriced", d["_unpriced"].get("claude-mythos-preview"), 1)
 check("history: worktree counts as its repository", sorted(b["p"]), ["beta"])
 check("history: calls", b["n"], 2)
 run_in(home, ["--backfill", f"--data-dir={dd}"])
@@ -931,6 +931,40 @@ gs = run(files, [NOW - 3600, f"--session-id={sid}", f"--since5h={NOW - 3600}"])[
 check("fast: after switching it off, an earlier fast turn forecasts at standard speed",
       gs["turns"][0]["on"]["opus"], ss["turns"][0]["on"]["opus"], tol=1)
 check("fast: the turn as it ran still counts its fast price", gs["turns"][0]["u"], 2 * gs["turns"][1]["u"], tol=1)
+
+# ---------------- v0.7.4 ----------------
+# 54. Mythos is priced per version, at its Fable twin's price; a Mythos with
+#     no listed price (Preview) stays unpriced and listed.
+files = {"s.jsonl": [asst(NOW - 600, "y1", "claude-mythos-5-2", i=1000),
+                     asst(NOW - 590, "y2", "claude-fable-5-2", i=1000),
+                     asst(NOW - 580, "y3", "claude-mythos-preview", i=1000)]}
+d = run(files, [NOW - 3600])
+mo = d[str(NOW - 3600)]["models"]
+check("mythos: 5.2 is priced", mo.get("claude-mythos-5-2", {}).get("units"), mo.get("claude-fable-5-2", {}).get("units"))
+check("mythos: Preview stays unpriced", d["_unpriced"], {"claude-mythos-preview": 1})
+check("mythos: weights sent for the band", "mythos" in d["_weights"], True)
+
+# 55. R5: the 5H rate counts work only up to the newest reading.  10% after
+#     1,000 units; 1,000 more units after the reading have not shown yet.
+st = NOW - 3600
+ra = iso(st + 5 * 3600)
+files = {"s.jsonl": [user(st + 60), asst(st + 120, "r1", "claude-sonnet-5-5", i=1000),
+                     asst(st + 900, "r2", "claude-sonnet-5-5", i=1000)]}
+smp = [{"at": st + 30, "kind": "five_hour", "pct": 0, "resetsAt": ra, "ts": 1},
+       {"at": st + 600, "kind": "five_hour", "pct": 10, "resetsAt": ra, "ts": 1}]
+d = run(files, [st, f"--since5h={st}"], {"samples": smp, "ledger": []})
+check("rate: % per unit uses work up to the reading", d["_rate5"], 10 / 1000, tol=1e-6)
+
+# 56. A2: 12 sessions claim the same once-per-window alert at once; exactly
+#     one wins, and a later claim for the same window loses too.
+home = home_with({"x.jsonl": [asst(NOW - 60, "a", "claude-sonnet-5-5", i=10)]})
+dd = os.path.join(home, "data")
+procs = [run_in(home, [f"--data-dir={dd}", f"--claim=wall5h|{ra}"], wait=False) for _ in range(12)]
+wins_ = sum(json.loads(pr.communicate()[0])["claimed"] for pr in procs)
+check("claim: one of 12 parallel claims wins", wins_, 1)
+check("claim: a later claim for the same window loses", run_in(home, [f"--data-dir={dd}", f"--claim=wall5h|{ra}"])["claimed"], False)
+check("claim: the next window can be claimed", run_in(home, [f"--data-dir={dd}", f"--claim=wall5h|next"])["claimed"], True)
+shutil.rmtree(home)
 
 print("\nFAILURES:", fails)
 sys.exit(1 if fails else 0)
