@@ -2,6 +2,13 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
+## 0.6.2 (2026-11-17)
+
+Manual wording, and README screenshots.
+
+- **The manual reads plainly.**  It follows Runenir's content rules: no "your", no metaphors, no question-led lines.  "Your numbers right now" is now "Live numbers", "Model cost on your own meter" is "Model cost on this meter", "How accurate is it?" is "Accuracy", and "Blind spot" is "Not counted".  No numbers or rules changed.
+- **README:** screenshots of the band in Mini and Full beside the History pane, the same wording rules, and a few jokes at the expense of a shrinking limit.
+
 ## 0.6.1 (2026-11-17)
 
 Runenir colours, a shorter band, and History pane fixes.
