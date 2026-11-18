@@ -2,7 +2,9 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `/plugin update manapool`.
 
-## Unreleased
+## 0.6.1 (2026-11-17)
+
+Runenir colours, a shorter band, and History pane fixes.
 
 - **Runenir colours.**  Mana Pool now uses the hues of Runenir, the -nir UI library, at exactly the lightness and saturation it had before, so nothing is brighter or louder.  Greys take a faint violet cast, and the accent, blue and red are Runenir's.  Backgrounds, green, amber, the cache orange and model colours are unchanged.
 - **Pills follow Runenir's badge rule:** the level sits in the pill's tint and a 35% edge, and the words are main text.  Red pill words go from APCA Lc 43 to 89.  In Mini the dotted (amber) and dashed (red) edges stay.
