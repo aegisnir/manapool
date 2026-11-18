@@ -66,6 +66,7 @@ except ImportError:
     def unlock(f):
         f.seek(0)
         msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
@@ -722,6 +723,8 @@ _fresh = roll([c for c in calls.values() if c["t"] >= _cover])
 # Saved further down, once the Elsewhere share of each day is known.
 
 CALLS = sorted(calls.values(), key=lambda c: c["t"])
+# Just the times, in the same order, so calls_between can binary-search them.
+CALL_TS = [c["t"] for c in CALLS]
 prompts.sort()
 all_prompts.sort()
 
@@ -763,8 +766,10 @@ def solve3(A, b):
 
 
 def calls_between(a, b):
-    # CALLS is sorted by time; a linear filter is fine at these sizes
-    return [c for c in CALLS if a < c["t"] <= b]
+    # Calls with a < time <= b.  CALLS is sorted by time, so binary search
+    # finds both ends directly instead of walking the whole list; this runs
+    # thousands of times per scan, and the walk had become most of the scan.
+    return CALLS[bisect_right(CALL_TS, a):bisect_right(CALL_TS, b)]
 
 
 # Each tick: (dp, [list-weighted output, write(+input), read],
@@ -1004,8 +1009,12 @@ out_by_time = by_time(all_ticks)
 # ---------------------------------------------------------------------------
 def totals(a, b=None, pred=None):
     r = {"input": 0, "output": 0, "cache_write": 0, "cache_write_5m": 0, "cache_read": 0, "messages": 0, "units": 0.0, "listUnits": 0.0, "models": {}}
-    for c in CALLS:
-        if c["t"] < a or (b is not None and c["t"] > b) or (pred and not pred(c)):
+    # Calls with a <= time <= b, found by binary search on the sorted times
+    # (see calls_between) instead of checking every call on every use.
+    lo = bisect_left(CALL_TS, a)
+    hi = len(CALLS) if b is None else bisect_right(CALL_TS, b)
+    for c in CALLS[lo:hi]:
+        if pred and not pred(c):
             continue
         r["input"] += c["i"]; r["output"] += c["o"]; r["cache_write"] += c["w"]; r["cache_write_5m"] += c["w5"]; r["cache_read"] += c["r"]
         r["messages"] += 1
