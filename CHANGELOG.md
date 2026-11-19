@@ -2,6 +2,10 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.14 (2026-11-19)
+
+- **Minority models show on the pace charts.**  On 5H pace and 7D pace, the band under each step is split by each model's share of the rise before it, stacked in Daily's order, so a model that helped but never did most of a rise still shows (a short Sonnet session beside a long Fable one was invisible).  The line keeps the leading model's colour.  The legend lists every model that did work here this window with its share of that work, biggest first ("Fable 94%, Sonnet 4%"), instead of only the models that led a rise.
+
 ## 0.7.13 (2026-11-18)
 
 - **Limit by time uses the 5H windows rules.**  A cell needs 3+ days of data before it is coloured in, and its likely range is now measured between days, not ticks: ticks from one session share its models and way of working, so one busy Monday morning (77 ticks) had passed as a sure figure.  Colours follow 5H windows (faint at usual, full colour at 10% off, was 20%), and the header names a slot only at 15%+ off (was 5%).  Tooltips say "vs usual" (the figure is all ticks pooled, not a median) and how many days a cell pools.  With two weeks of ticks every cell is an outline for now; they fill in as more weeks come in.

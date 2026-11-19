@@ -344,3 +344,35 @@ test('History: pace lines in model colours, with Elsewhere', async ($, on) => {
   for (const s of svgs) expect(s.length).toBeLessThan(131072)
   await ui.unmount()
 })
+
+// 0.7.14: a model that helped but never led a rise still shows, as its share
+// of a split band and as a legend entry with its share of the window.
+test('History: a minority model gets a band slice and a legend share', async ($, on) => {
+  const now = NOW / 1000, ra7 = iso(NOW + 3 * 86400e3), ra5 = iso(NOW + 2 * 3600e3)
+  const M = (f: number, s: number) => ({ 'claude-fable-5-2': [0, f, 0, 0], 'claude-sonnet-5-5': [0, s, 0, 0] })
+  // Fable leads every rise; Sonnet adds a third as much on one of them
+  const samples: any[] = [
+    { at: now - 3 * 3600, kind: 'five_hour', pct: 5, resetsAt: ra5, models: M(1e6, 0) },
+    { at: now - 2 * 3600, kind: 'five_hour', pct: 10, resetsAt: ra5, models: M(2e6, 1.5e6) },
+    { at: now - 1 * 3600, kind: 'five_hour', pct: 15, resetsAt: ra5, models: M(3e6, 1.5e6) },
+  ]
+  const live = { 'claude-fable-5-2': { input: 0, output: 3e6, cache_write: 0, cache_read: 0, units: 0 }, 'claude-sonnet-5-5': { input: 0, output: 1.5e6, cache_write: 0, cache_read: 0, units: 0 } }
+  const view = viewOf(15, 10, { wins: [{ kind: 'five_hour', pct: 15, resetsAt: ra5, tokens: { ...tok, models: live } },
+    { kind: 'seven_day', pct: 10, resetsAt: ra7, tokens: tok }], samples })
+  on('state.get', (_: unknown, e: any) => {
+    if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+    if (e.key === 'range') return { value: { value: { shape: 'range-1', value: 7 }, version: 1 } }
+    return { value: { value: undefined, version: 0 } }
+  })
+  on('store.get', () => ({ value: [] }))
+  const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+    props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+  const w = await words(ui)
+  // Fable output at 4x Sonnet's list price: 60M vs 7.5M units
+  expect(w).toMatch(/Fable 89%/)
+  expect(w).toMatch(/Sonnet 11%/)
+  const all = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? '')).join('\n')
+  expect(all).toMatch(/fill="#a8ceff" fill-opacity="0\.3"/) // a Sonnet slice
+  expect(all).not.toMatch(/stroke="#a8ceff"/) // but no Sonnet line: it never led
+  await ui.unmount()
+})
