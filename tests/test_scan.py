@@ -571,19 +571,28 @@ check("by time: the noon-crossing tick fills no afternoon cell", g[0][3], None)
 check("by time: a 90% range is reported", (g[0][2] or {}).get("err", 0) > 0, True)
 shutil.rmtree(home)
 
-# 31. 7D readings are kept 120 days in the tick log, 5H readings 30.
+# 31. 5H and 7D readings are kept 120 days in the tick log (0.7.8: 5H was 30).
+#     A 60-day-old 5H window has no transcripts behind it: it is kept for the
+#     History pane only, and must make no ledger row and no elsewhere.
 home = home_with({})
 dd = os.path.join(home, "data")
 os.makedirs(dd)
+ra60 = iso(NOW - 60 * 86400 + 3600)
 old = [{"at": NOW - 60 * 86400, "kind": "seven_day", "pct": 50, "resetsAt": iso(NOW - 55 * 86400)},
-       {"at": NOW - 60 * 86400, "kind": "five_hour", "pct": 50, "resetsAt": iso(NOW - 60 * 86400 + 3600)},
+       {"at": NOW - 60 * 86400 - 600, "kind": "five_hour", "pct": 40, "resetsAt": ra60, "lu": 0, "models": {}},
+       {"at": NOW - 60 * 86400, "kind": "five_hour", "pct": 50, "resetsAt": ra60, "lu": 0, "models": {}},
+       {"at": NOW - 200 * 86400, "kind": "five_hour", "pct": 30, "resetsAt": iso(NOW - 200 * 86400 + 3600)},
        {"at": NOW - 200 * 86400, "kind": "seven_day", "pct": 40, "resetsAt": iso(NOW - 195 * 86400)}]
 with open(os.path.join(dd, "samples.jsonl"), "w") as f:
     for s in old:
         f.write(json.dumps(s) + "\n")
 d = run_ny([NOW - 3600, f"--now={NOW}", f"--data-dir={dd}"])
 kinds = sorted((s["kind"], s["pct"]) for s in d.get("_samples", []))
-check("tick log: a 60-day-old 7D reading stays, 5H and 200-day 7D go", kinds, [("seven_day", 50)])
+check("tick log: 60-day-old readings stay, 200-day ones go", kinds, [("five_hour", 40), ("five_hour", 50), ("seven_day", 50)])
+check("tick log: a finished window's readings go out slimmed", sorted(next(s for s in d["_samples"] if s["kind"] == "five_hour")), ["at", "kind", "pct", "resetsAt", "ts"])
+check("old 5H window without transcripts: no ledger row", [r for r in d.get("_ledgerNew", []) if r.get("resetsAt") == ra60], [])
+check("old 5H window without transcripts: no elsewhere", any(b.get("e") for b in d["_history"]["days"].values()), False)
+check("old 5H window without transcripts: no limit size", ra60 in (d.get("_limitSize") or {}), False)
 shutil.rmtree(home)
 
 # 32. Elsewhere: the meter moves 0 -> 10% with 1,000 units here, then

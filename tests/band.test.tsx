@@ -238,3 +238,48 @@ test('History: a Fable day shows at its weighed share of 7D', async ($, on) => {
   expect(src).not.toMatch(/>10\.0%</)
   await ui.unmount()
 })
+
+// 0.7.8: 5H windows replaces Limit size.  85 days of busy 5H windows (three a
+// day, a reading every 2 minutes) must stay inside the pane's limits at every
+// range: one Svg under 131,072 characters, all charts together under about
+// 250k (past that the desktop app stops redrawing the pane).  The pace charts
+// say "Usual range", not "Middle half".
+const busyHistory = () => {
+  const samples: any[] = [], ledger: any[] = [], limitSize: Record<string, number> = {}
+  const day0 = Math.floor(NOW / 1000) - 85 * 86400
+  for (let d = 0; d < 85; d++) for (const h of [8, 14, 19]) {
+    const st = day0 + d * 86400 + h * 3600, ra = iso((st + 5 * 3600) * 1000)
+    if (st + 5 * 3600 > NOW / 1000) continue
+    for (let i = 1; i <= 150; i++) samples.push({ at: st + i * 120, kind: 'five_hour', pct: Math.min(100, Math.round(i * 0.4 + (d % 5))), resetsAt: ra })
+    const pct = Math.min(100, Math.round(150 * 0.4 + (d % 5)))
+    ledger.push({ kind: 'five_hour', resetsAt: ra, start: st, end: st + 5 * 3600, pct, seen: st + 18000, units: pct * 700000, per1: 700000,
+      tokens: [0, 0, 0, 0], models: ['Opus'], outside: 0, weights: 'list', at: st + 18000, readings: 150, rule: 4, orule: 3 })
+    limitSize[ra] = 700000 * (1 + ((d * 7 + h) % 13 - 6) / 100)
+  }
+  return { samples, ledger, limitSize }
+}
+for (const range of [7, 30, 90] as const) {
+  test(`History ${range}D: 5H windows replaces Limit size, and stays inside the pane's size limits`, async ($, on) => {
+    const { samples, ledger, limitSize } = busyHistory()
+    const view = viewOf(40, 30, { samples, limitSize })
+    on('state.get', (_: unknown, e: any) => {
+      if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+      if (e.key === 'range') return { value: { value: { shape: 'range-1', value: range }, version: 1 } }
+      return { value: { value: undefined, version: 0 } }
+    })
+    on('store.get', (_: unknown, e: any) => ({ value: e?.key === 'ledger' ? ledger : [] }))
+    const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+      props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+    const w = await words(ui)
+    expect(w).toMatch(/5H windows/)
+    expect(w).not.toMatch(/Limit size/)
+    const svgs = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? ''))
+    const all = svgs.join('\n')
+    expect(all).toMatch(/Climb of each window/)
+    expect(all).toMatch(/Usual range/)
+    expect(all).not.toMatch(/Middle half/)
+    for (const s of svgs) expect(s.length).toBeLessThan(131072)
+    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(250000)
+    await ui.unmount()
+  })
+}

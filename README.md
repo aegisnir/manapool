@@ -12,7 +12,7 @@ It covers three things, most urgent first:
 
 A History pane breaks past work down by day, model, project and hour.
 
-Officially, the limit has always been this size. The Limit size chart keeps a dated record anyway.
+Officially, the limit has always been this size. The 5H windows chart keeps a dated record anyway.
 
 ![Mana Pool in Mini size under a chat, with the History pane open beside it](docs/screenshots/mini-band.png)
 
@@ -40,9 +40,9 @@ A **History** pane (the ▤ button on the band, or `/manapool history`), over 7,
 |-------|-------|
 | Tiles | 7D used, how much of 7D is left per day until it resets, and the share of the last 7 days spent re-reading. |
 | Daily | Work per day, stacked by model, in % of 7D. Hatched on top: elsewhere. |
-| 5H pace | This window against the middle half of past windows, with a projection to 100%. |
-| 7D pace | This week against an even pace to 100% at reset, and last week (the middle half of past weeks once there are 3), with a projection. |
-| Limit size | Work per 1% of 5H, one dot per finished window, dated, violet above the median and coral below. A falling line is a shrinking limit. Points moved elsewhere are left out. |
+| 5H pace | This window against the usual range of past windows (the middle half of those in the chosen range), with a projection to 100%. |
+| 7D pace | This week against an even pace to 100% at reset, and last week (the usual range of past weeks once there are 3), with a projection. |
+| 5H windows | Each 5H window on a real timeline: how far it climbed, and below it the work 1% bought, green above usual and red below, joined by a waveform. A run of red is a shrinking limit. Points moved elsewhere are left out. |
 | Limit by time | Work per 1% of 5H by weekday and 4-hour block, against the median. Shows whether the limit is bigger at night or on weekends. |
 | Projects | Work by the folder each session ran in. |
 | Hours | Work by weekday and hour of day. |
@@ -109,7 +109,7 @@ Read every number Mana Pool shows as an estimate. This is what has been checked,
 
 ## Privacy
 
-It reads `~/.claude/projects/**/*.jsonl` on this computer and keeps token counts, times, model names, message ids and file paths (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` when set): `samples.jsonl` (the tick log: 5H readings kept 30 days, 7D readings 120 days), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript's full path and the full path of the folder each session ran in), `ticks.json` (each meter tick's percent and work per model, kept 180 days so the model weights outlive deleted transcripts) and `history.json` (one row per day for the History pane: work per model, per hour, per project and elsewhere, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere, not even to Llama. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
+It reads `~/.claude/projects/**/*.jsonl` on this computer and keeps token counts, times, model names, message ids and file paths (no conversation text) in the mod's own store and in `~/.claude/plugins/data/manapool/` (under `CLAUDE_CONFIG_DIR` when set): `samples.jsonl` (the tick log: 5H and 7D readings kept 120 days), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript's full path and the full path of the folder each session ran in), `ticks.json` (each meter tick's percent and work per model, kept 180 days so the model weights outlive deleted transcripts) and `history.json` (one row per day for the History pane: work per model, per hour, per project and elsewhere, where a project is the name of the folder a session ran in; kept for 400 days). Nothing is sent anywhere, not even to Llama. The scanner imports only the Python standard library and has no network code. The only other programs it runs are Python 3 (the scanner) and, on macOS, `osascript` (the notification fallback).
 
 ## Files
 

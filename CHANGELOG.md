@@ -2,6 +2,17 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.8 (2026-11-18)
+
+Limit size is replaced by a 5H windows chart, and the pace charts say what their grey band is.
+
+- **5H windows replaces Limit size.**  Every 5H window on a real timeline, following the range buttons: on top, how far each window climbed (7D: its readings as steps; 30D and 90D: each day's highest climb); below, the work 1% bought in it at the measured model weights.  Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off, a ±10% band for normal scatter, and a waveform through the dots filled to the usual line.  The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%.  Hollow dots (under 15% used) are rough: the line through them is dashed and the fill skips them.  Idle time is hatched; days before the first kept window say "No data".  30D and 90D show the middle of each day's windows with a line for their range.  The header keeps Limit size's "Steady" or "Down N% lately".
+- **5H readings are kept 120 days** (was 30 days, 3,000 at most), like 7D readings, so 90D can draw climbs.  Readings past 29 days have no transcripts behind them and count for nothing but the charts: the ledger, elsewhere and the weight fits still stop at 29 days (a new test checks a 60-day-old window makes no ledger row and no elsewhere).  A finished window's readings go to the mod slimmed to time, percent and window, so the larger log does not grow every scan's output.
+- **"Middle half" is now "Usual range"** in 5H pace and 7D pace, and every tooltip line has a colour key for the mark it names.
+- **5H pace's usual follows the range buttons:** the past windows that started in the last 7, 30 or 90 days (was the last 30 windows).
+- **Limit by time uses the same green and red** for a bigger and a smaller limit (was violet and coral).
+- **Darker chart cards.**  The History charts sit on a near-black card (`#0b0a14`, was grey `#262626`); grey labels read a little better (APCA Lc 47.5, was 44.6).  The band keeps its own background.
+
 ## 0.7.7 (2026-11-18)
 
 Limit size now measures what the limit buys, not which model you used.  From an independent review of two weeks of real data: the limit held within about 5 to 9%, while raw per-window figures swung 2.6x with the share of Fable.

@@ -1168,7 +1168,8 @@ usable = [t for t in ticks if sum(t[1]) > 0]
 TICKS_FILE = os.path.join(data_dir, "ticks.json") if data_dir else ""
 TICK_V = 2  # 2: [start, end, % moved, {model: [output, write+input, read]}, calls]; 1 kept list totals only
 TICK_KEEP_DAYS = 180
-SEVEN_KEEP_DAYS = 120  # 7D readings in the tick log (5H readings: 30 days)
+SEVEN_KEEP_DAYS = 120  # 7D readings in the tick log
+FIVE_KEEP_DAYS = 120   # 5H readings too: the History pane's 5H windows chart draws 90 days of climbs
 HALF_LIFE_DAYS = 30
 PRIOR_SD = math.log(2)   # starting belief: a model's weight is within ~2x of list
 TICK_SD_FLOOR = 0.4      # a single tick is at least ~40% off (one reply of slop)
@@ -1713,11 +1714,14 @@ if SAMPLES_FILE:
             add = [sample_of(kind, ra, pct) for kind, ra, pct in readings
                    if kind in SPAN and pct > top.get((kind, ra or ""), -1)]
             log += add
-            # 5H readings older than 30 days are no use (their transcripts are
-            # gone): rewrite without them once in a while; otherwise just append.
-            # 7D readings are kept 120 days (about 90 a week) so the History
-            # pane's 7D pace can compare this week with the usual past weeks.
-            keep5 = [s for s in log if s.get("kind") != "seven_day" and s.get("at", 0) >= now - 30 * 86400][-3000:]
+            # Readings are kept 120 days, then dropped (the file is rewritten
+            # once in a while; otherwise just appended to).  5H readings past
+            # 29 days have no transcripts behind them: everything that counts
+            # work (ledger, elsewhere, the fits) stops at `oldest`, so they only
+            # draw the History pane's 5H windows chart and 5H pace's usual
+            # range.  7D readings let 7D pace compare this week with past ones.
+            # About 80 5H readings a day: the cap only stops a runaway file.
+            keep5 = [s for s in log if s.get("kind") != "seven_day" and s.get("at", 0) >= now - FIVE_KEEP_DAYS * 86400][-20000:]
             keep7 = [s for s in log if s.get("kind") == "seven_day" and s.get("at", 0) >= now - SEVEN_KEEP_DAYS * 86400][-2000:]
             keep = sorted(keep5 + keep7, key=lambda s: s.get("at", 0))
             if not exists or len(keep) < len(log):
@@ -1735,7 +1739,12 @@ if SAMPLES_FILE:
             out["_samplesFile"] = True
         finally:
             unlock(lk)
-    out["_samples"] = samples
+    # A finished window's readings go out slimmed to time, percent and window:
+    # the mod reads the heavy fields (work per model) only for the current
+    # windows, and 120 days of full readings would be megabytes on every scan.
+    out["_samples"] = [s if not s.get("resetsAt") or s.get("kind") not in SPAN or win_bounds(s["kind"], s["resetsAt"])[1] > now
+                       else {"at": s["at"], "ts": s.get("ts", 2), "kind": s["kind"], "pct": s["pct"], "resetsAt": s["resetsAt"]}
+                       for s in samples] if SAMPLES_FILE else samples
 
 out["_unpriced"] = unpriced  # model id -> calls left out (not in the price table)
 out["_history"] = {"full": _hfull, "days": {k: _hdays[k] for k in sorted(_hdays)[-HIST_SEND:]}}
