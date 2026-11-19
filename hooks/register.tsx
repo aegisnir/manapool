@@ -797,6 +797,10 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   }
   // The models a line used, in Daily's stacking order, for its legend
   const usedOf = (ks: string[]) => [...MODEL_ORDER, 'else'].filter(k => ks.includes(k))
+  // The projection and the "now" dot take the last model that did work here
+  // (0.7.12): the pace ahead is that model's.  Elsewhere is skipped; a window
+  // with no work here at all stays grey.
+  const lastModel = (ks: string[]) => [...ks].reverse().find(k => k !== 'else') ?? 'else'
 
   // --- 5H pace: this window against the usual range of past windows ---
   // "Usual" follows the range buttons: the past windows that started in the
@@ -840,14 +844,15 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     }
     // the model behind the line at minute m: the last point at or before it
     const kAt5 = (m: number) => { if (!ks5) return ''; let k = ks5[0]!; pts.forEach((p, i) => { if (p[0] <= m) k = ks5[i]! }); return k }
+    const pc5 = ks5 ? colOf(lastModel(ks5)) : ME
     const rw = d.runway(w5)
     if (rw.r > 0 && nowMin < 300) {
       const endM = rw.bad ? Math.min(300, nowMin + rw.leftMs / 60000) : 300
       const endP = Math.min(100, pctNow + (rw.r * (endM - nowMin)) / 60)
-      out += `<path d="M${sx(nowMin)},${sy(pctNow)} L${sx(endM)},${sy(endP)}" fill="none" stroke="${ME}" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>`
+      out += `<path d="M${sx(nowMin)},${sy(pctNow)} L${sx(endM)},${sy(endP)}" fill="none" stroke="${pc5}" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>`
       if (rw.bad) out += `<line x1="${sx(endM)}" x2="${sx(endM)}" y1="${sy(100)}" y2="${base}" stroke="${RED}" stroke-dasharray="2 3"/>`
     }
-    out += `<circle cx="${sx(nowMin)}" cy="${sy(pctNow)}" r="4" fill="${ME}" stroke="${CARD}" stroke-width="2"><title>${esc(`Now · ${pctTxt(pctNow)}`)}</title></circle>`
+    out += `<circle cx="${sx(nowMin)}" cy="${sy(pctNow)}" r="4" fill="${pc5}" stroke="${CARD}" stroke-width="2"><title>${esc(`Now · ${pctTxt(pctNow)}`)}</title></circle>`
     out += label(sx(nowMin) + (nowMin > 200 ? -8 : 8), sy(pctNow) - 8, `${Math.round(pctNow)}% now`, nowMin > 200 ? 'end' : 'start', INK)
     // hours into the window, and the clock time each one falls on
     {
@@ -865,7 +870,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           const k = kAt5(m)
           lines.push({ s: `This window ${Math.round(p)}%${k ? ` · ${nameOf(k)}` : ''}`, key: { col: k ? colOf(k) : ME } })
           mk += ring(x, sy(p), ME)
-        } else if (rw.r > 0) lines.push({ s: `Projected ${Math.round(Math.min(100, pctNow + (rw.r * (m - nowMin)) / 60))}%`, key: { col: ME, kind: 'dash' } })
+        } else if (rw.r > 0) lines.push({ s: `Projected ${Math.round(Math.min(100, pctNow + (rw.r * (m - nowMin)) / 60))}%`, key: { col: pc5, kind: 'dash' } })
         if (p50.length) lines.push({ s: `Usual ${Math.round(p50[i]!)}%`, key: { col: HIST } }, { s: `Usual range ${Math.round(p25[i]!)} to ${Math.round(p75[i]!)}%`, key: { col: HIST, kind: 'band' } })
         out += hover(hitRect(x - cw / 2, top, cw, base - top), mk, tipBox(x, top, H, lines))
       })
@@ -932,14 +937,15 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     out += ks7 ? modelSteps(pts7, ks7, sx, sy, base)
       : `<defs>${gradDef('p7', C7, false)}</defs><path d="${steps(pts7)}" fill="none" stroke="url(#p7)" stroke-width="2" stroke-linejoin="round"/>`
     const kAt7 = (dd: number) => { if (!ks7) return ''; let k = ks7[0]!; pts7.forEach((p, i) => { if (p[0] <= dd) k = ks7[i]! }); return k }
+    const pc7 = ks7 ? colOf(lastModel(ks7)) : C7
     const rw = d.runway(w7)
     if (rw.r > 0 && nowD < 7) {
       const endD = rw.bad ? Math.min(7, nowD + rw.leftMs / 1000 / DAY) : 7
       const endP = Math.min(100, pctNow + rw.r * (endD - nowD) * 24)
-      out += `<path d="M${sx(nowD)},${sy(pctNow)} L${sx(endD)},${sy(endP)}" fill="none" stroke="${C7}" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>`
+      out += `<path d="M${sx(nowD)},${sy(pctNow)} L${sx(endD)},${sy(endP)}" fill="none" stroke="${pc7}" stroke-width="2" stroke-dasharray="2 4" stroke-linecap="round"/>`
       if (rw.bad) out += `<line x1="${sx(endD)}" x2="${sx(endD)}" y1="${sy(100)}" y2="${base}" stroke="${RED}" stroke-dasharray="2 3"/>`
     }
-    out += `<circle cx="${sx(nowD)}" cy="${sy(pctNow)}" r="4" fill="${C7}" stroke="${CARD}" stroke-width="2"/>`
+    out += `<circle cx="${sx(nowD)}" cy="${sy(pctNow)}" r="4" fill="${pc7}" stroke="${CARD}" stroke-width="2"/>`
     out += label(sx(nowD) + (nowD > 4.7 ? -8 : 8), sy(pctNow) - 8, `${Math.round(pctNow)}% now`, nowD > 4.7 ? 'end' : 'start', INK)
     for (let i = 0; i <= 7; i++) out += dayTick(sx(i), H - 2, (st + i * DAY) * 1000, i === 7 ? 'end' : 'middle')
     // hover: one column per 6 hours
@@ -952,7 +958,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         const k = kAt7(dd)
         lines.push({ s: `This week ${Math.round(p)}%${k ? ` · ${nameOf(k)}` : ''}`, key: { col: k ? colOf(k) : C7 } })
         mk += ring(x, sy(p), C7)
-      } else if (rw.r > 0) lines.push({ s: `Projected ${Math.round(Math.min(100, pctNow + rw.r * (dd - nowD) * 24))}%`, key: { col: C7, kind: 'dash' } })
+      } else if (rw.r > 0) lines.push({ s: `Projected ${Math.round(Math.min(100, pctNow + rw.r * (dd - nowD) * 24))}%`, key: { col: pc7, kind: 'dash' } })
       lines.push({ s: `Even pace ${Math.round((dd / 7) * 100)}%`, key: { col: DIM, kind: 'dash' } })
       if (p50.length) lines.push({ s: `Usual ${Math.round(p50[i]!)}%`, key: { col: HIST } }, { s: `Usual range ${Math.round(p25[i]!)} to ${Math.round(p75[i]!)}%`, key: { col: HIST, kind: 'band' } })
       else if (showLast) {
@@ -1436,8 +1442,8 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('The ▤ button (or `/manapool history`) opens charts of past use over 7, 30 or 90 days. Hover a bar, dot or cell for its numbers. Each model keeps one colour everywhere: Opus violet, Sonnet blue, Fable gold, Mythos orange, Haiku teal, grey for any other.')
   L.push('- **Tiles**: **7D used**; **Per day left**, what is left of 7D spread evenly over the days until it resets; **Re-reading**, the share of the last 7 days spent re-reading the conversation.')
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading). Hatched on top: **elsewhere**, each elsewhere point times its window\'s work per 1%, on the day of the reading that showed it (the tooltip says "since" when it started on an earlier day). Elsewhere only shows between two readings, so a day with none says **not measured**.')
-  L.push('- **5H pace**: this window\'s readings against past windows, with the projection to 100% and an even pace (dashed: 100% at reset). Clock times sit under the hours. Usual is the middle past window at each minute; the usual range is the middle half of them. Both follow the range buttons: the windows that started in the last 7, 30 or 90 days. The line is in model colours, as in Daily: each rise takes the colour of the model that did most of the work behind it (weighed at the weights in use), and the band below each flat stretch takes the colour of the rise before it. A rise with no work here is grey, **Elsewhere**.')
-  L.push('- **7D pace** (projection and dot blue, as 7D is everywhere; the line in model colours, as in 5H pace): this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
+  L.push('- **5H pace**: this window\'s readings against past windows, with the projection to 100% and an even pace (dashed: 100% at reset). Clock times sit under the hours. Usual is the middle past window at each minute; the usual range is the middle half of them. Both follow the range buttons: the windows that started in the last 7, 30 or 90 days. The line is in model colours, as in Daily: each rise takes the colour of the model that did most of the work behind it (weighed at the weights in use), and the band below each flat stretch takes the colour of the rise before it. A rise with no work here is grey, **Elsewhere**. The projection and the dot take the colour of the last model that did work here. Sonnet is blue, Mythos orange, and a model with no list price grey, **Other**.')
+  L.push('- **7D pace** (in model colours, as in 5H pace): this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
   L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb), with the 7D meter behind it in blue on the same scale (it drops to 0 where 7D resets). A climb gets stronger from 50% and is solid violet at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
   L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Green is a bigger limit, red a smaller one, as in 5H windows. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done. A row pools every matching weekday, so the right edge says how many days went in, not a date.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')

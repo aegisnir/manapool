@@ -336,6 +336,11 @@ test('History: pace lines in model colours, with Elsewhere', async ($, on) => {
   expect(all).toMatch(/fill="#eac75e" fill-opacity="0\.3"/) // a Fable band
   expect(all).toMatch(/This week \d+% · Fable/)
   expect(all).toMatch(/This week \d+% · Elsewhere/)
+  // 0.7.12: projection and dot take the last model that did work here.  7D:
+  // Fable, not Elsewhere's grey (no 7D projection here: too few readings for a
+  // runway).  5H: its last switch was to Opus.
+  expect(all).toMatch(/r="4" fill="#eac75e"/)
+  expect(all).toMatch(/stroke="#8d7cd5" stroke-width="2" stroke-dasharray="2 4"/)
   for (const s of svgs) expect(s.length).toBeLessThan(131072)
   await ui.unmount()
 })
