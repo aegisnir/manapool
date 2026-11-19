@@ -292,3 +292,50 @@ for (const range of [7, 30, 90] as const) {
     await ui.unmount()
   })
 }
+
+// 0.7.11: the pace lines take Daily's model colours.  Each rise is the model
+// that did most of the work since the reading before (readings carry every
+// model's tokens since the window started); a rise with no work here is
+// Elsewhere.  A 5H window that switches model every few readings must still
+// stay inside the per-Svg size limit (one path per run of a colour).
+test('History: pace lines in model colours, with Elsewhere', async ($, on) => {
+  const now = NOW / 1000, ra7 = iso(NOW + 3 * 86400e3), ra5 = iso(NOW + 2 * 3600e3)
+  const M = (o: number, f: number) => ({ 'claude-opus-5-5': [0, o, 0, 0], 'claude-fable-5-2': [0, f, 0, 0] })
+  const samples: any[] = [
+    { at: now - 3.5 * 86400, kind: 'seven_day', pct: 5, resetsAt: ra7, models: M(1e6, 0) },
+    { at: now - 2.5 * 86400, kind: 'seven_day', pct: 15, resetsAt: ra7, models: M(1e6, 1e6) },
+    { at: now - 2 * 86400, kind: 'seven_day', pct: 16, resetsAt: ra7, models: M(1e6, 1e6) },
+  ]
+  // 5H: a reading every 2 minutes for 3 hours, the model switching every 3 readings
+  let o = 0, f = 0
+  for (let i = 1; i <= 90; i++) {
+    if (Math.floor(i / 3) % 2) f += 5e4; else o += 5e4
+    samples.push({ at: now - 3 * 3600 + i * 120, kind: 'five_hour', pct: Math.round(i / 3), resetsAt: ra5, models: M(o, f) })
+  }
+  const live = (a: number, b: number) => ({ 'claude-opus-5-5': { input: 0, output: a, cache_write: 0, cache_read: 0, units: 0 }, 'claude-fable-5-2': { input: 0, output: b, cache_write: 0, cache_read: 0, units: 0 } })
+  const view = viewOf(30, 16, {
+    wins: [{ kind: 'five_hour', pct: 30, resetsAt: ra5, tokens: { ...tok, models: live(o, f) } },
+      { kind: 'seven_day', pct: 16, resetsAt: ra7, tokens: { ...tok, models: live(1e6, 1e6) } }],
+    samples,
+  })
+  on('state.get', (_: unknown, e: any) => {
+    if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+    if (e.key === 'range') return { value: { value: { shape: 'range-1', value: 7 }, version: 1 } }
+    return { value: { value: undefined, version: 0 } }
+  })
+  on('store.get', () => ({ value: [] }))
+  const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+    props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+  const w = await words(ui)
+  expect(w).toMatch(/Opus/)
+  expect(w).toMatch(/Fable/)
+  expect(w).toMatch(/Elsewhere/)
+  expect(w).not.toMatch(/This week/)
+  const svgs = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? ''))
+  const all = svgs.join('\n')
+  expect(all).toMatch(/fill="#eac75e" fill-opacity="0\.3"/) // a Fable band
+  expect(all).toMatch(/This week \d+% · Fable/)
+  expect(all).toMatch(/This week \d+% · Elsewhere/)
+  for (const s of svgs) expect(s.length).toBeLessThan(131072)
+  await ui.unmount()
+})

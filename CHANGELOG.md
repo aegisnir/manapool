@@ -2,6 +2,10 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.11 (2026-11-18)
+
+- **Pace lines in model colours.**  5H pace and 7D pace draw this window's line in Daily's model colours (Opus violet, Fable gold, Haiku teal...).  Each rise takes the colour of the model that did most of the work behind it, read from the per-model figures every meter reading already carries, and the area under each flat stretch is filled in the colour of the rise before it, so the chart reads as bands of time.  A rise with no work here (use elsewhere, or 7D rounding overnight) is grey, **Elsewhere**.  Heights are still the meter's own readings.  The legend names the models used, and tooltips add the model ("This week 35% · Fable").  Projection and dot keep 5H violet and 7D blue.  Readings without per-model figures keep the old single-colour line.
+
 ## 0.7.10 (2026-11-18)
 
 - **Dates on every axis.**  Daily (7D), 7D pace and 5H windows (7D) label every day with its weekday and date; 5H pace puts the clock time under 0h to 5h.  All in the computer's own time zone.
