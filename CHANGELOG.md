@@ -2,6 +2,13 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.9 (2026-11-18)
+
+- **5H windows: no more red climbs.**  A window that reached 90%+ was drawn in the same red as "smaller limit".  Climbs now stay violet and get stronger from 50%, solid at 100%; the 30D and 90D bars do the same.  Red only means a smaller limit.
+- **5H windows: $ on the right.**  The dot lane keeps work units on the left and shows the same figure in Opus dollars at list price on the right (1 unit is $2 per million tokens), and tooltips give both: "951k ($1.90) per 1%".  It is what that work would cost through the API on Opus, not what a subscription costs.
+- **5H windows: model shares in tooltips.**  A window that mixed models says how much of the limit each used ("Opus 62% · Fable 38%", at the measured weights) instead of "Opus + Fable", so a Fable-heavy window is plain on hover.
+- **Hover highlights show again** on Daily and two other charts: their `0.07` opacity was cut to `0.0` when the chart was written out.
+
 ## 0.7.8 (2026-11-18)
 
 Limit size is replaced by a 5H windows chart, and the pace charts say what their grey band is.

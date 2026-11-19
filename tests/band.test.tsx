@@ -278,6 +278,15 @@ for (const range of [7, 30, 90] as const) {
     expect(all).toMatch(/Climb of each window/)
     expect(all).toMatch(/Usual range/)
     expect(all).not.toMatch(/Middle half/)
+    // trim() keeps one decimal, so an opacity written 0.07 became 0.0 and
+    // the hover highlight vanished.  No drawing may carry a zero opacity.
+    expect(all).not.toMatch(/opacity="0\.0"/)
+    // A climb near the limit is a stronger violet, never red (red means a smaller limit).
+    expect(all).not.toMatch(/stroke="#fe5166" stroke-width="1\.5" stroke-linejoin/)
+    if (range === 7) expect(all).toMatch(/url\(#wClimb\)" fill-opacity="0\.6"/)
+    // Work per 1% in units on the left and Opus dollars on the right (700k units = $1.40)
+    expect(all).toMatch(/>\$1\.40</)
+    expect(all).toMatch(/700k \(\$1\.40\) per 1%/)
     for (const s of svgs) expect(s.length).toBeLessThan(131072)
     expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(250000)
     await ui.unmount()

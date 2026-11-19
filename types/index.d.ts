@@ -77,6 +77,8 @@ export type View = {
   fit?: Fit
   // Limit size: each finished 5H window's work per 1%, model-weighted, by resetsAt
   limitSize?: Record<string, number>
+  // each mixed 5H window's model shares in whole percent at the measured weights, by resetsAt (scan.py _limitMix)
+  limitMix?: Record<string, Record<string, number>>
   check?: Check | null
   ledgerCount?: number
   unpriced?: Record<string, number>  // model id -> calls left out: not in the price table

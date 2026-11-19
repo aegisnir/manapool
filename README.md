@@ -42,7 +42,7 @@ A **History** pane (the ▤ button on the band, or `/manapool history`), over 7,
 | Daily | Work per day, stacked by model, in % of 7D. Hatched on top: elsewhere. |
 | 5H pace | This window against the usual range of past windows (the middle half of those in the chosen range), with a projection to 100%. |
 | 7D pace | This week against an even pace to 100% at reset, and last week (the usual range of past weeks once there are 3), with a projection. |
-| 5H windows | Each 5H window on a real timeline: how far it climbed, and below it the work 1% bought, green above usual and red below, joined by a waveform. A run of red is a shrinking limit. Points moved elsewhere are left out. |
+| 5H windows | Each 5H window on a real timeline: how far it climbed (stronger violet the closer it got to 100%), and below it the work 1% bought (units on the left, Opus dollars on the right), green above usual and red below, joined by a waveform. A run of red is a shrinking limit. Points moved elsewhere are left out. |
 | Limit by time | Work per 1% of 5H by weekday and 4-hour block, against the median. Shows whether the limit is bigger at night or on weekends. |
 | Projects | Work by the folder each session ran in. |
 | Hours | Work by weekday and hour of day. |

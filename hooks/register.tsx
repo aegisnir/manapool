@@ -472,6 +472,10 @@ const trim = (body: string) => body.replace(/="([^"]*)"/g, (_m, v: string) => `=
 const svgDoc = (h: number, body: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${HW + 16} ${h + 16}" width="${HW + 16}" height="${h + 16}">${HOVER_CSS}` +
   `<rect width="${HW + 16}" height="${h + 16}" rx="10" fill="${CARD}"/><g transform="translate(8 8)" ${FONT} font-size="10">${trim(body)}</g></svg>`
+// Work units as Opus dollars at list price: 1 unit is $2 per million tokens
+// (scan.py), and the 5H windows figures are weighed to the Opus ruler.  Not
+// what a subscription costs; what the same work would cost through the API.
+const usd = (n: number) => `$${(n / 5e5).toFixed(2)}`
 const label = (x: number, y: number, s: string, anchor = 'start', col = DIM) =>
   `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${col}">${esc(s)}</text>`
 // A tooltip beside the point (x, y): the first line in ink, the rest dim.  It
@@ -532,9 +536,9 @@ const longDay = (k: string) => dayOfKey(k).toLocaleDateString('en-US', { weekday
 const gridLine = (x0: number, y: number, s: string) =>
   `<line x1="${x0}" x2="${HW}" y1="${y}" y2="${y}" stroke="${GRID}"/>${label(x0 - 4, y + 3, s, 'end')}`
 // A bar grown up from the baseline: top corners rounded, bottom flat.
-const upBar = (x: number, y: number, w: number, h: number, fill: string) => {
+const upBar = (x: number, y: number, w: number, h: number, fill: string, op = 1) => {
   const r = Math.min(3, w / 2, h)
-  return `<path d="M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z" fill="${fill}"/>`
+  return `<path d="M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z" fill="${fill}"${op < 1 ? ` fill-opacity="${op}"` : ''}/>`
 }
 // A bar grown right from the axis: only its data end rounded.
 const rightBar = (x: number, y: number, w: number, h: number, fill: string) => {
@@ -696,7 +700,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const since = a === z && D[keys[a]!]?.es ? ` since ${new Date(D[keys[a]!]!.es! * 1000).toLocaleDateString('en-US', { weekday: 'short' })}` : ''
       const elseLine = [...(es > 0 ? [`Elsewhere ${valTxt(es)}${since}`] : []),
         ...(unmeasured === z - a + 1 ? ['Elsewhere not measured'] : unmeasured > 0 ? [`Elsewhere not measured on ${unmeasured} ${unmeasured === 1 ? 'day' : 'days'}`] : [])]
-      hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
+      hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity=".07"/>`,
         tipBox(cx, top, H, sum + es > 0 ? [name, `${valTxt(sum + es)}${per7 > 0 && sum > 0 ? ` · ${fmt(sum)} units here` : ''}`,
           ...[...parts].reverse().map(([m, u]) => `${cap(m)} ${valTxt(u)}`), ...elseLine, `${calls} calls`] : [name, 'No work here', ...elseLine]))
     }
@@ -903,6 +907,10 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     }
     all.sort((a, b) => a.st - b.st)
     if (all.length) {
+      // Room on the right for the $ scale: the chart draws 34 px narrower and
+      // HW is put back before the card is written (svgDoc uses the full width).
+      const HW_FULL = HW
+      HW -= 34
       const nowS = now / 1000
       const t1 = nowS, t0 = range === 7 ? nowS - 7 * DAY : dayOfKey(keys[0]!).setHours(0, 0, 0, 0) / 1000
       const inR = all.filter(w => w.end > t0 && w.st < t1)
@@ -920,7 +928,10 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const syV = (x: number) => base - pad - ((Math.min(hi, Math.max(lo, x)) - lo) / (hi - lo || 1)) * (dotH - 2 * pad)
       const colOf = (x: number) => (med ? mix(DIM, x >= med ? UP : DOWN, Math.min(1, Math.abs(x - med) / med / SAT)) : DIM)
       const vsTxt = (x: number) => { const p = Math.round((x / med - 1) * 100); return `${p >= 0 ? '+' : '−'}${Math.abs(p)}% vs usual` }
-      const climbCol = (pk: number) => (pk >= 90 ? DOWN : ME)
+      // A climb's strength: as today up to 50%, then stronger until solid at
+      // 100%, so a window near the limit stands out without a second colour
+      // (red is kept for "smaller limit").  One decimal, as trim() keeps.
+      const climbOp = (pk: number) => (0.5 + 0.5 * Math.min(1, Math.max(0, (pk - 50) / 50))).toFixed(1)
       // Gradient stops as percentages and one-decimal opacities: trim() cuts
       // every number in an attribute to one decimal, so 0.064 would become 0.0.
       const off = (y: number) => `${(Math.min(1, Math.max(0, (y - dotTop) / dotH)) * 100).toFixed(1)}%`
@@ -929,7 +940,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         `<stop offset="${off(syV(med))}" stop-color="${DOWN}" stop-opacity="0.1"/><stop offset="${off(syV(med * (1 - SAT)))}" stop-color="${DOWN}" stop-opacity="${a}"/></linearGradient>`
       let out = `<defs><pattern id="wIdle" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="4" stroke="${GRID}" stroke-width="1.5"/></pattern>` +
         `<pattern id="wNone" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="${HIST}" stroke-width="1" stroke-opacity="0.6"/></pattern>` +
-        `<linearGradient id="wClimb" x1="0" x2="0" y1="1" y2="0"><stop offset="0" stop-color="${ME}" stop-opacity="0.1"/><stop offset="1" stop-color="${ME}" stop-opacity="0.5"/></linearGradient>` +
+        `<linearGradient id="wClimb" x1="0" x2="0" y1="1" y2="0"><stop offset="0" stop-color="${ME}" stop-opacity="0.2"/><stop offset="1" stop-color="${ME}" stop-opacity="1"/></linearGradient>` +
         (med ? wave('wFill', 0.8) + wave('wLine', 1) : '') + `</defs>`
       // lanes: grid and labels
       out += [0, 50, 100].map(t => gridLine(x0, syP(t), `${t}%`)).join('')
@@ -937,7 +948,8 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         // normal scatter: ±10% around usual, shaded
         const yA = syV(med * 1.1), yB = syV(med * 0.9)
         out += `<rect x="${x0}" y="${yA}" width="${HW - x0}" height="${yB - yA}" fill="${HIST}" fill-opacity="0.2"/>`
-        out += [lo, med, hi].map(t => (t === med || Math.abs(syV(t) - syV(med)) >= 11 ? gridLine(x0, syV(t), fmt(t))
+        // units on the left; on the right the same figure in Opus dollars
+        out += [lo, med, hi].map(t => (t === med || Math.abs(syV(t) - syV(med)) >= 11 ? gridLine(x0, syV(t), fmt(t)) + label(HW + 4, syV(t) + 3, usd(t))
           : `<line x1="${x0}" x2="${HW}" y1="${syV(t)}" y2="${syV(t)}" stroke="${GRID}"/>`)).join('')
         out += `<line x1="${x0}" x2="${HW}" y1="${syV(med)}" y2="${syV(med)}" stroke="${DIM}" stroke-dasharray="4 4"/>`
       }
@@ -967,14 +979,17 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           for (const [t, p] of w.pts) d += ` H${sx(Math.max(t0, t))} V${syP(p)}`
           if (!w.pts.length) d += ` V${syP(w.peak)}` // readings gone: the ledger's top reading
           d += ` H${sx(endT)}`
-          out += `<path d="${d} V${syP(0)} Z" fill="url(#wClimb)"/><path d="${d}${endT < t1 ? ` V${syP(0)}` : ''}" fill="none" stroke="${climbCol(w.peak)}" stroke-width="1.5" stroke-linejoin="round"/>`
+          out += `<path d="${d} V${syP(0)} Z" fill="url(#wClimb)" fill-opacity="${climbOp(w.peak)}"/><path d="${d}${endT < t1 ? ` V${syP(0)}` : ''}" fill="none" stroke="${ME}" stroke-width="1.5" stroke-linejoin="round"/>`
           const cx = sx((a + endT) / 2)
           if (w.per1 > 0 && med) { pts.push([cx, syV(w.per1), w.sure]); dots += dot(cx, w.per1, w.sure) }
           const lines: TipLine[] = [`${stamp(w.st * 1000).replace(/ [A-Z]{2,5}$/, '')} to ${hm(w.end * 1000)}`,
-            { s: `Climbed to ${w.peak}%${w.peak >= 100 ? ' · limit reached' : ''}`, key: { col: climbCol(w.peak) } },
-            w.per1 > 0 && med ? { s: `${fmt(w.per1)} per 1% · ${vsTxt(w.per1)}${w.sure ? '' : ' · low confidence'}`, key: { col: colOf(w.per1), kind: w.sure ? 'dot' : 'ring' } }
+            { s: `Climbed to ${w.peak}%${w.peak >= 100 ? ' · limit reached' : ''}`, key: { col: ME } },
+            w.per1 > 0 && med ? { s: `${fmt(w.per1)} (${usd(w.per1)}) per 1% · ${vsTxt(w.per1)}${w.sure ? '' : ' · low confidence'}`, key: { col: colOf(w.per1), kind: w.sure ? 'dot' : 'ring' } }
               : { s: w.end > nowS ? 'Window still open' : 'Too little work to size', key: { col: DIM, kind: 'ring' } },
-            ...(w.models.length ? [w.models.join(' + ')] : []),
+            // Mixed windows: each model's share of the limit used (scan.py
+            // _limitMix), so a Fable-heavy window is plain on hover.
+            ...(v.limitMix?.[w.ra] ? [Object.entries(v.limitMix[w.ra]!).map(([m, p]) => `${m} ${p}%`).join(' · ')]
+              : w.models.length ? [w.models.join(' + ')] : []),
             ...(w.outside > 0 ? [`${w.outside}% elsewhere`] : [])]
           const xa = sx(a), xb = sx(endT)
           hv += hover(hitRect(xa, top, Math.max(3, xb - xa), base - top), `<rect x="${xa}" y="${top}" width="${Math.max(3, xb - xa)}" height="${base - top}" fill="${INK}" fill-opacity="0.1"/>`, tipBox((xa + xb) / 2, top, H, lines))
@@ -993,7 +1008,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           if (a + DAY <= first) return
           if (!ws.length) { out += `<rect x="${x}" y="${top}" width="${cw}" height="${laneH}" fill="url(#wIdle)"/>`; return }
           const pk = Math.max(...ws.map(w => w.peak))
-          out += upBar(x + (cw - bw) / 2, syP(pk), bw, Math.max(2, (pk / 100) * laneH), climbCol(pk))
+          out += upBar(x + (cw - bw) / 2, syP(pk), bw, Math.max(2, (pk / 100) * laneH), ME, +climbOp(pk))
           const vals = ws.filter(w => w.per1 > 0).map(w => w.per1)
           if (vals.length && med) {
             const m = median(vals), cx = x + cw / 2, sure = ws.some(w => w.sure && w.per1 > 0)
@@ -1006,8 +1021,8 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           const vals = ws.filter(w => w.per1 > 0).map(w => w.per1), pk = ws.length ? Math.max(...ws.map(w => w.peak)) : 0
           const before = dayOfKey(keys[z]!).setHours(24, 0, 0, 0) / 1000 <= first
           const lines: TipLine[] = before ? [name, 'No data'] : !ws.length ? [name, 'No use'] : [name, `${ws.length} ${ws.length === 1 ? 'window' : 'windows'}`,
-            { s: `Highest climb ${pk}%`, key: { col: climbCol(pk) } },
-            ...(vals.length && med ? [{ s: `${fmt(median(vals))} per 1% (middle) · ${vsTxt(median(vals))}`, key: { col: colOf(median(vals)), kind: 'dot' as const } },
+            { s: `Highest climb ${pk}%`, key: { col: ME } },
+            ...(vals.length && med ? [{ s: `${fmt(median(vals))} (${usd(median(vals))}) per 1% (middle) · ${vsTxt(median(vals))}`, key: { col: colOf(median(vals)), kind: 'dot' as const } },
               ...(vals.length > 1 ? [{ s: `Range ${fmt(Math.min(...vals))} to ${fmt(Math.max(...vals))}`, key: { col: DIM } }] : [])] : [])]
           const xa = x0 + a * cw, wd = (z - a + 1) * cw
           hv += hover(hitRect(xa, top, wd, base - top), `<rect x="${xa}" y="${top}" width="${wd}" height="${base - top}" fill="${INK}" fill-opacity="0.1"/>`, tipBox(xa + wd / 2, top, H, lines))
@@ -1044,10 +1059,11 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         right = Math.abs(chg) < 0.15 ? `Steady · usual ${fmt(med)} per 1%` : `${chg < 0 ? 'Down' : 'Up'} ${Math.round(Math.abs(chg) * 100)}% lately`
       } else if (med) right += ` · usual ${fmt(med)} per 1%`
       const hot = inR.filter(w => w.peak >= 90).length
+      HW = HW_FULL
       windows = {
         svg: svgDoc(H, out), alt: `${inR.length} 5H windows over ${range} days${hot ? `, ${hot} reached 90%` : ''}${med ? `, usual ${fmt(med)} work units per 1%` : ''}`,
         right, rightBad: right.startsWith('Down'),
-        legend: [{ name: range === 7 ? 'Window climb' : 'Highest climb that day', col: ME }, { name: 'Reached 90%+', col: DOWN },
+        legend: [{ name: range === 7 ? 'Window climb' : 'Highest climb that day', col: ME },
           { name: 'Bigger limit', col: UP, glyph: '●' }, { name: 'Smaller limit', col: DOWN, glyph: '●' }, { name: 'Under 15% used', col: DIM, glyph: '○' },
           ...(range === 7 ? [] : [{ name: 'Range that day', col: DIM, glyph: '│' }]),
           ...(med ? [{ name: `Usual ${fmt(med)}`, col: DIM, glyph: '┄' }, { name: 'Normal ±10%', col: mix(CARD, HIST, 0.5) }] : []),
@@ -1126,7 +1142,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           rightBar(lx, y, w, 14, name === 'Other' && i === rows.length - 1 && rest > 0 ? 'url(#po)' : 'url(#pj)') +
           `<text x="${lx + w + 6}" y="${y + 11}" fill="${DIM}" font-size="11">${esc(valTxt(u))}</text>`
         const isRest = name === 'Other' && i === rows.length - 1 && rest > 0
-        hv += hover(hitRect(-4, y - 3, HW + 4, rowH), `<rect x="-4" y="${y - 3}" width="${HW + 4}" height="${rowH}" rx="4" fill="${INK}" fill-opacity="0.07"/>`,
+        hv += hover(hitRect(-4, y - 3, HW + 4, rowH), `<rect x="-4" y="${y - 3}" width="${HW + 4}" height="${rowH}" rx="4" fill="${INK}" fill-opacity=".07"/>`,
           tipBox(lx + w + 40, y - 3, Math.max(H, 48), [isRest ? `Other (${all.length - 5} folders)` : name, `${valTxt(u)} · ${Math.round((u / sum) * 100)}% of work`, `${fmt(u)} work units`]))
       })
       out += hv
@@ -1180,7 +1196,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const name = a === z ? longDay(keys[a]!) : `${shortDay(keys[a]!)} to ${shortDay(keys[z]!)}`
       const t = totals.slice(a, z + 1).reduce((p, q) => p + q, 0)
       const r = keys.slice(a, z + 1).reduce((p, k) => p + (D[k]?.r ?? 0), 0)
-      hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity="0.07"/>`,
+      hv += hover(hitRect(x0 + a * sx, top, (z - a + 1) * sx, base - top), a === z ? crossX(cx, top, base) : `<rect x="${x0 + a * sx}" y="${top}" width="${(z - a + 1) * sx}" height="${base - top}" fill="${INK}" fill-opacity=".07"/>`,
         tipBox(cx, top, H, t > 0
           ? [name, `Re-reading ${Math.round((r / t) * 100)}% · ${valTxt(r)}`, `New work ${valTxt(t - r)}`, `Total ${valTxt(t)}`]
           : [name, 'No work']))
@@ -1279,7 +1295,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading). Hatched on top: **elsewhere**, each elsewhere point times its window\'s work per 1%, on the day of the reading that showed it (the tooltip says "since" when it started on an earlier day). Elsewhere only shows between two readings, so a day with none says **not measured**.')
   L.push('- **5H pace**: this window\'s readings against past windows, with the projection to 100%. Usual is the middle past window at each minute; the usual range is the middle half of them. Both follow the range buttons: the windows that started in the last 7, 30 or 90 days.')
   L.push('- **7D pace**: this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
-  L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb). Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
+  L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb). A climb gets stronger from 50% and is solid violet at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
   L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Green is a bigger limit, red a smaller one, as in 5H windows. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
@@ -1629,7 +1645,7 @@ export const register: Register = on => {
         compactAt: compactOff ? undefined : compactAt || sums._compactAt || undefined,
         session: sums._session ?? undefined, weights: sums._weights, long: sums._long, handoff: sums._handoff,
         fit: sums._fit, check: sums._check as Check | null, ledgerCount: ledger.length,
-        unpriced: sums._unpriced, history: sums._history, byTime: sums._byTime ?? undefined, limitSize: sums._limitSize ?? undefined,
+        unpriced: sums._unpriced, history: sums._history, byTime: sums._byTime ?? undefined, limitSize: sums._limitSize ?? undefined, limitMix: sums._limitMix ?? undefined,
       }
       await io.show(() => nv)
       // The History pane's copy: first time, when the older days arrive, or

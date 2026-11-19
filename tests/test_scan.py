@@ -994,6 +994,17 @@ d = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "
 ls = d["_limitSize"]
 check("limit size: a Fable window is not a smaller limit", ls[iso(NOW - 3 * 86400)] / ls[iso(NOW - 2 * 86400)], 1.0, tol=0.15)
 check("limit size: at list prices it would have looked half", led[0]["per1"] / led[1]["per1"], 0.5)
+# Model mix in the 5H windows tooltip: each model's share at the measured
+# weights.  Fable output is 2x Opus at list, and the meter weighs Fable 2x
+# Opus per list unit, so 250k Fable + 1M Opus output is 50/50 of the limit
+# (33% Fable at list).  One-model windows get no mix.
+led.append({"kind": "five_hour", "resetsAt": iso(NOW - 86400), "start": NOW - 86400 - 18000, "pct": 10, "outside": 0,
+            "per1": 1_000_000, "units": 10_000_000, "byModel": {"claude-opus-5-5": [0, 1_000_000, 0, 0, 0], "claude-fable-5-2": [0, 250_000, 0, 0, 0]}, "rule": RULE_NOW})
+d = run_in(home, [start, f"--data-dir={dd}", f"--now={NOW}"], {"samples": smp, "ledger": led})
+mx = d.get("_limitMix") or {}
+check("model mix: a mixed window has both models", sorted(mx.get(iso(NOW - 86400), {})), ["Fable", "Opus"])
+check("model mix: Fable's share is weighed, not list", mx.get(iso(NOW - 86400), {}).get("Fable", 0), 50, tol=0.15)
+check("model mix: a one-model window has none", iso(NOW - 2 * 86400) in mx, False)
 shutil.rmtree(home)
 
 # ---------------- v0.7.7 ----------------

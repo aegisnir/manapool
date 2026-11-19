@@ -1573,6 +1573,30 @@ vals = sorted(row_units(r) / here_pts(r) for r in full if row_units(r) > 0)
 SIZE_MIN = 8
 out["_limitSize"] = {r["resetsAt"]: round(row_units(r) / here_pts(r)) for r in kept + new_rows
                      if r.get("kind") == "five_hour" and here_pts(r) >= SIZE_MIN and row_units(r) > 0}
+
+
+def row_mix(r):
+    """Each model family's share of a window's work, in whole percent, at the
+    same weights as row_units (so the shares are how much of the limit each
+    model used, not its list price).  Families under 1% are left out."""
+    fam_u = {}
+    for m, t in (r.get("byModel") or {}).items():
+        fam = key_of(m)
+        if not fam:
+            continue
+        ww = w(fam, float("inf") if "#long" in m else 0, ver_of(m) or None, "#fast" in m)
+        fam_u[fam] = fam_u.get(fam, 0.0) + cost({"i": t[0], "o": t[1], "w": t[2], "r": t[3], "w5": t[4] if len(t) > 4 else 0}, ww)
+    tot = sum(fam_u.values())
+    if tot <= 0:
+        return {}
+    return {f.capitalize(): round(u / tot * 100) for f, u in sorted(fam_u.items(), key=lambda kv: -kv[1]) if u / tot >= 0.01}
+
+
+# Model mix per 5H window (the 5H windows tooltip), keyed by resetsAt.  Only
+# rows with transcripts behind them (byModel), and only mixed windows: a
+# one-model window says so already in its model list.
+out["_limitMix"] = {r["resetsAt"]: mx for r in kept + new_rows
+                    if r.get("kind") == "five_hour" for mx in [row_mix(r)] if len(mx) > 1}
 chk = None
 if starts and since5h:
     cur = out.get(str(int(since5h)))
