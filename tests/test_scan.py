@@ -563,12 +563,34 @@ d = run_ny([NOW - 3600, f"--now={NOW}", f"--data-dir={dd}"])
 bt = d.get("_byTime") or {}
 g = bt.get("grid") or [[None] * 6] * 7
 check("by time: 20 ticks kept (crossing, long and outside-use left out)", bt.get("ticks"), 20)
-check("by time: median of all kept ticks", bt.get("per1"), 1500, tol=1)
+check("by time: usual is all kept ticks pooled", bt.get("per1"), 1500, tol=1)
 check("by time: Monday 8 AM to noon", (g[0][2] or {}).get("per1"), 1000, tol=1)
 check("by time: Saturday 8 AM to noon", (g[5][2] or {}).get("per1"), 2000, tol=1)
 check("by time: Saturday tick count", (g[5][2] or {}).get("n"), 10)
 check("by time: the noon-crossing tick fills no afternoon cell", g[0][3], None)
 check("by time: a 90% range is reported", (g[0][2] or {}).get("err", 0) > 0, True)
+check("by time: Monday pools 1 day", (g[0][2] or {}).get("days"), 1)
+check("by time: one day alone has a range as wide as its figure", (g[0][2] or {}).get("err"), 1645, tol=1)
+shutil.rmtree(home)
+
+# 30b. The range is measured between days, not ticks (0.7.13).  Tuesday 9 AM
+#      over three days at 900, 1,000 and 1,100 units per 1%, 10 ticks each:
+#      the day spread is ~58, under the per-tick floor (1000 x 0.4 / sqrt 30 =
+#      73), so the 90% range is 1.645 x 73 = 120: trusted (12% < 15%).
+home = home_with({})
+dd = os.path.join(home, "data")
+os.makedirs(dd)
+tk = []
+for day, r in ((5, 900), (12, 1000), (19, 1100)):
+    for i in range(10):
+        tk.append([L(2027, 1, day, 9, i * 2), L(2027, 1, day, 9, i * 2 + 1), 1, {"sonnet": [0, r, 0]}, 3])
+with open(os.path.join(dd, "ticks.json"), "w") as f:
+    json.dump({"v": 2, "ticks": tk}, f)
+d = run_ny([NOW - 3600, f"--now={NOW}", f"--data-dir={dd}"])
+c = ((d.get("_byTime") or {}).get("grid") or [[None] * 6] * 7)[1][2] or {}
+check("by time: Tuesday pools 3 days", c.get("days"), 3)
+check("by time: Tuesday per 1%", c.get("per1"), 1000, tol=1)
+check("by time: range from the day spread, floored per tick", c.get("err"), 120, tol=1)
 shutil.rmtree(home)
 
 # 31. 5H and 7D readings are kept 120 days in the tick log (0.7.8: 5H was 30).

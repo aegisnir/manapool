@@ -2,6 +2,10 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.13 (2026-11-18)
+
+- **Limit by time uses the 5H windows rules.**  A cell needs 3+ days of data before it is coloured in, and its likely range is now measured between days, not ticks: ticks from one session share its models and way of working, so one busy Monday morning (77 ticks) had passed as a sure figure.  Colours follow 5H windows (faint at usual, full colour at 10% off, was 20%), and the header names a slot only at 15%+ off (was 5%).  Tooltips say "vs usual" (the figure is all ticks pooled, not a median) and how many days a cell pools.  With two weeks of ticks every cell is an outline for now; they fill in as more weeks come in.
+
 ## 0.7.12 (2026-11-18)
 
 - **Projection in the last model's colour.**  On 5H pace and 7D pace, the projection and the "now" dot take the colour of the last model that did work here (Elsewhere is skipped), instead of 5H violet and 7D blue.  The tooltip's Projected key matches.

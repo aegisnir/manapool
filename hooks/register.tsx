@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Check, LedgerRow, Sample, Session, Turn, View, Win } from '../types'
+import type { ByTimeCell, Check, LedgerRow, Sample, Session, Turn, View, Win } from '../types'
 
 // The slash command and the side pane's id.
 const CMD = 'manapool'
@@ -1220,13 +1220,19 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
 
   // --- Limit by time: work per 1% of 5H by weekday and 4-hour block ---
   // From scan.py's by_time(): every kept tick (180 days, so the range buttons
-  // do not change it), model-adjusted.  Each cell against the median of all
-  // ticks: purple a bigger limit, coral a smaller one, deeper the further off
-  // (full colour at 20%).  A cell whose 90% range is wider than 15% is drawn
-  // as an outline only: too few ticks to trust its colour.
+  // do not change it), model-adjusted.  Each cell against the usual figure
+  // (all kept ticks pooled).  Same rules as 5H windows (0.7.13): green a
+  // bigger limit, red a smaller one, faint at usual and full colour at 10%
+  // off; the header names a slot only at 15%+ off.  A cell is an outline only,
+  // too little data to trust its colour, when it pools under BT_MIN_DAYS days
+  // or its 90% range is wider than 15%.  The range is measured between days
+  // (scan.py), since ticks from one session are not separate evidence.
   let byTime: Chart | null = null
   {
     const bt = v.byTime
+    const SAT = 0.1, TREND = 0.15, BT_MIN_DAYS = 3  // as 5H windows: full colour 10% off, header from 15%
+    // older scans have no per-cell days: judge those by their range alone
+    const weak = (c: ByTimeCell) => (c.days ?? BT_MIN_DAYS) < BT_MIN_DAYS || c.err / c.per1 > 0.15
     if (bt && bt.per1 > 0 && bt.grid?.some(r => r.some(Boolean))) {
       const blocks = bt.grid[0]!.length, bh = 24 / blocks
       // Each row pools every matching weekday in the kept ticks, so its right
@@ -1241,31 +1247,32 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         row.forEach((c, b) => {
           const x = x0 + b * cell + 1, w = cell - 2
           if (!c) { out += `<rect x="${x}" y="${y}" width="${w}" height="${ch}" rx="2" fill="${EMPTY}"/>`; return }
-          const diff = c.per1 / bt.per1 - 1, thin = c.err / c.per1 > 0.15
-          const col = mix(EMPTY, diff >= 0 ? UP : DOWN, 0.3 + 0.7 * Math.min(1, Math.abs(diff) / 0.2))
+          const diff = c.per1 / bt.per1 - 1, thin = weak(c)
+          const col = mix(EMPTY, diff >= 0 ? UP : DOWN, 0.1 + 0.9 * Math.min(1, Math.abs(diff) / SAT))
           out += thin
             ? `<rect x="${x + 0.75}" y="${y + 0.75}" width="${w - 1.5}" height="${ch - 1.5}" rx="2" fill="none" stroke="${col}" stroke-width="1.5"/>`
             : `<rect x="${x}" y="${y}" width="${w}" height="${ch}" rx="2" fill="${col}"/>`
           const sign = diff >= 0.005 ? '+' : diff <= -0.005 ? '−' : ''
           hv += hover(hitRect(x, y, w, ch), `<rect x="${x - 1}" y="${y - 1}" width="${w + 2}" height="${ch + 2}" rx="3" class="o"/>`,
             tipBox(x + w / 2, y + ch + 4, H, [`${WEEK[r]} ${hourTxt(b * bh)} to ${hourTxt(((b + 1) * bh) % 24)}`,
-              `${sign}${Math.abs(Math.round(diff * 100))}% vs median`, `${fmt(c.per1)} work units per 1%`,
-              `${c.n} ticks, ${c.pct}% moved`, `Likely range ±${Math.round((c.err / c.per1) * 100)}%${thin ? ', too wide to judge' : ''}`]))
+              `${sign}${Math.abs(Math.round(diff * 100))}% vs usual`, `${fmt(c.per1)} work units per 1%`,
+              `${c.n} ticks${c.days ? ` over ${c.days} ${c.days === 1 ? 'day' : 'days'}` : ''}, ${c.pct}% moved`,
+              `Likely range ±${Math.round((c.err / c.per1) * 100)}%${thin ? ', too little data to judge' : ''}`]))
         })
       })
       for (let b = 0; b < blocks; b += blocks > 6 ? 2 : 1) out += label(x0 + b * cell + 1, H - 1, hourTxt(b * bh).replace(' ', '').toLowerCase())
       // the strongest trustworthy cell, for the header
       let best: { d: number; name: string } | null = null
       bt.grid.forEach((row, r) => row.forEach((c, b) => {
-        if (!c || c.err / c.per1 > 0.15) return
+        if (!c || weak(c)) return
         const d_ = c.per1 / bt.per1 - 1
         if (!best || Math.abs(d_) > Math.abs(best.d)) best = { d: d_, name: `${WEEK[r]} ${hourTxt(b * bh).replace(' ', '').toLowerCase()}` }
       }))
       const b_ = best as { d: number; name: string } | null
-      const right = (b_ && Math.abs(b_.d) >= 0.05 ? `${b_.name} ${b_.d > 0 ? '+' : '−'}${Math.round(Math.abs(b_.d) * 100)}%` : `${bt.ticks} ticks · no clear pattern yet`)
+      const right = (b_ && Math.abs(b_.d) >= TREND ? `${b_.name} ${b_.d > 0 ? '+' : '−'}${Math.round(Math.abs(b_.d) * 100)}%` : `${bt.ticks} ticks · no clear pattern yet`)
       byTime = {
-        svg: svgDoc(H, out + hv), alt: `Work per 1% of 5H by weekday and ${bh}-hour block against the median of ${bt.ticks} ticks`, right,
-        legend: [{ name: 'Smaller limit', col: DOWN }, { name: 'Bigger limit', col: UP }, { name: 'Outline: too few ticks', col: DIM }],
+        svg: svgDoc(H, out + hv), alt: `Work per 1% of 5H by weekday and ${bh}-hour block against the usual figure of ${bt.ticks} ticks`, right,
+        legend: [{ name: 'Smaller limit', col: DOWN }, { name: 'Bigger limit', col: UP }, { name: 'Outline: too little data', col: DIM }],
       }
       text.push(`Limit by time: ${right}`)
     }
@@ -1445,7 +1452,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **5H pace**: this window\'s readings against past windows, with the projection to 100% and an even pace (dashed: 100% at reset). Clock times sit under the hours. Usual is the middle past window at each minute; the usual range is the middle half of them. Both follow the range buttons: the windows that started in the last 7, 30 or 90 days. The line is in model colours, as in Daily: each rise takes the colour of the model that did most of the work behind it (weighed at the weights in use), and the band below each flat stretch takes the colour of the rise before it. A rise with no work here is grey, **Elsewhere**. The projection and the dot take the colour of the last model that did work here. Sonnet is blue, Mythos orange, and a model with no list price grey, **Other**.')
   L.push('- **7D pace** (in model colours, as in 5H pace): this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
   L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb), with the 7D meter behind it in blue on the same scale (it drops to 0 where 7D resets). A climb gets stronger from 50% and is solid violet at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
-  L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the median of all ticks (kept 180 days, so the range buttons do not change it). Green is a bigger limit, red a smaller one, as in 5H windows. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. A cell whose 90% range is wider than 15% is an outline: too few ticks to trust. This measures how much the limit holds at that time, not how much you got done. A row pools every matching weekday, so the right edge says how many days went in, not a date.')
+  L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the usual figure (kept 180 days, so the range buttons do not change it). Green is a bigger limit, red a smaller one, as in 5H windows. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. Usual is all kept ticks pooled. Same colour rules as 5H windows: faint at usual, full colour at 10% off, and the header names a slot only at 15% or more. A cell is an outline, too little data to trust, when it pools under 3 days or its 90% range is wider than 15%. The range is measured between days, not ticks: ticks from one session share its models and way of working, so a single busy morning is one sample however many ticks it has. This measures how much the limit holds at that time, not how much you got done. A row pools every matching weekday, so the right edge says how many days went in, not a date.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
   L.push('- **Re-reading**: the share of work spent on cache reads, the old conversation sent again on every call. (The turn strip on the band counts a turn\'s re-reading more exactly.)')

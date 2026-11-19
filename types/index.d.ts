@@ -58,7 +58,8 @@ export type History = { full: boolean; days: Record<string, HistDay> }
 // Limit by time (scan.py by_time): work per 1% of 5H by local weekday (Monday
 // first) and `block`-hour slot, from kept meter ticks, model-adjusted.  A cell:
 // pooled work per 1%, ticks, % moved, and the half-width of its 90% range.
-export type ByTimeCell = { per1: number; n: number; pct: number; err: number }
+// days: how many separate days the cell pools (0.7.13+; older scans leave it out)
+export type ByTimeCell = { per1: number; n: number; days?: number; pct: number; err: number }
 // days: how many separate days each weekday row pools (Mon first)
 export type ByTime = { per1: number; ticks: number; block: number; grid: (ByTimeCell | null)[][]; days?: number[] }
 // herePct: the points of pct the work here moved (pct less outside); per1 is over these.

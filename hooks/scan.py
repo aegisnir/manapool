@@ -1295,6 +1295,12 @@ if any(v != 1.0 for v in MM.values()):
 #   use: claude.ai or the phone app moved the meter, not this computer).
 # - Pooled per slot (all work over all % moved) with a 90% range, so a slot
 #   with few ticks says so instead of looking certain.
+# - The range comes from the spread between DAYS, not ticks (0.7.13).  Ticks
+#   from one session share its models and way of working, so 80 ticks from
+#   one Monday morning are one sample, not 80: counted per tick, a single
+#   morning looked certain.  A slot with one day has no spread to measure and
+#   reports a range as wide as its figure.  The per-tick floor (one tick is
+#   ~40% off) still applies, so many days of a few ticks each stay wide too.
 # ---------------------------------------------------------------------------
 BT_MAX_MIN = 90
 BT_BLOCK_H = 4
@@ -1321,18 +1327,28 @@ def by_time(ticks_):
     # a row is every Monday in the kept ticks, not one date
     days = [len({r[4] for r in rows if r[0] == wd}) for wd in range(7)]
     cells = {}
-    for wd, blk, dp, u, _d in rows:
-        cells.setdefault((wd, blk), []).append((dp, u))
+    for wd, blk, dp, u, d in rows:
+        cells.setdefault((wd, blk), []).append((dp, u, d))
     grid = [[None] * (24 // BT_BLOCK_H) for _ in range(7)]
     for (wd, blk), lst in cells.items():
         n = len(lst)
-        sy = sum(dp for dp, u in lst)
-        rk = sum(u for dp, u in lst) / sy
-        # ratio estimator's spread, as in the model weights above; one tick is
-        # at least ~40% off, so a slot never claims more than its count allows
-        var = sum((u - rk * dp) ** 2 for dp, u in lst) / sy ** 2 * n / (n - 1) if n > 1 else rk ** 2
+        sy = sum(dp for dp, u, _d in lst)
+        rk = sum(u for dp, u, _d in lst) / sy
+        # one sample per day: that day's work and % moved in this slot, added up
+        per_day = {}
+        for dp, u, d in lst:
+            a_ = per_day.setdefault(d, [0.0, 0.0])
+            a_[0] += dp
+            a_[1] += u
+        nd = len(per_day)
+        # ratio estimator's spread over the days, as in the model weights
+        # above; one day alone has no spread, so its range is its whole figure
+        var = (sum((u - rk * dp) ** 2 for dp, u in per_day.values()) / sy ** 2 * nd / (nd - 1)
+               if nd > 1 else rk ** 2)
+        # one tick is at least ~40% off, so a slot never claims more than its
+        # tick count allows either
         se = max(math.sqrt(var), rk * TICK_SD_FLOOR / math.sqrt(n))
-        grid[wd][blk] = {"per1": round(rk), "n": n, "pct": round(sy, 1), "err": round(1.645 * se)}
+        grid[wd][blk] = {"per1": round(rk), "n": n, "days": nd, "pct": round(sy, 1), "err": round(1.645 * se)}
     return {"per1": round(every), "ticks": len(rows), "block": BT_BLOCK_H, "grid": grid, "days": days}
 
 
