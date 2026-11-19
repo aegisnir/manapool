@@ -59,7 +59,8 @@ export type History = { full: boolean; days: Record<string, HistDay> }
 // first) and `block`-hour slot, from kept meter ticks, model-adjusted.  A cell:
 // pooled work per 1%, ticks, % moved, and the half-width of its 90% range.
 export type ByTimeCell = { per1: number; n: number; pct: number; err: number }
-export type ByTime = { per1: number; ticks: number; block: number; grid: (ByTimeCell | null)[][] }
+// days: how many separate days each weekday row pools (Mon first)
+export type ByTime = { per1: number; ticks: number; block: number; grid: (ByTimeCell | null)[][]; days?: number[] }
 // herePct: the points of pct the work here moved (pct less outside); per1 is over these.
 export type Check = { per1: number | null; pct: number; herePct?: number; lo: number | null; hi: number | null; n: number; outside: number }
 export type View = {

@@ -2,6 +2,14 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.10 (2026-11-18)
+
+- **Dates on every axis.**  Daily (7D), 7D pace and 5H windows (7D) label every day with its weekday and date; 5H pace puts the clock time under 0h to 5h.  All in the computer's own time zone.
+- **7D is blue, 5H violet.**  7D pace's line, projection and dot are blue, so the two pace charts read apart at a glance.
+- **5H pace has an even-pace line** (100% at reset), like 7D pace.  No tooltip line for it, to stay inside the pane's size budget.
+- **5H windows shows 7D behind the climbs**, in blue on the same 0 to 100% scale, dropping to 0 where 7D resets.  Tooltips give the 7D reading at the end of each window (or day).
+- **Limit by time says how many days each row pools** ("9 days"): a row is every matching weekday in the kept ticks, not one date.
+
 ## 0.7.9 (2026-11-18)
 
 - **5H windows: no more red climbs.**  A window that reached 90%+ was drawn in the same red as "smaller limit".  Climbs now stay violet and get stronger from 50%, solid at 100%; the 30D and 90D bars do the same.  Red only means a smaller limit.

@@ -1309,16 +1309,19 @@ def by_time(ticks_):
         if da.date() != db.date() or da.hour // BT_BLOCK_H != db.hour // BT_BLOCK_H:
             continue
         u = sum((g[0] * K[1] + g[1] * K[2] + g[2] * K[3]) * MM.get(k, 1.0) for k, g in groups.items())
-        rows.append((da.weekday(), da.hour // BT_BLOCK_H, dp, u))
+        rows.append((da.weekday(), da.hour // BT_BLOCK_H, dp, u, da.date()))
     if not rows:
         return None
-    mid = median([u / dp for _w, _b, dp, u in rows])
+    mid = median([u / dp for _w, _b, dp, u, _d in rows])
     rows = [r for r in rows if r[3] >= 0.25 * mid * r[2]]  # outside use, the ledger's rule
     if not rows:
         return None
     every = sum(r[3] for r in rows) / sum(r[2] for r in rows)
+    # how many separate days each weekday row pools (the chart's right edge):
+    # a row is every Monday in the kept ticks, not one date
+    days = [len({r[4] for r in rows if r[0] == wd}) for wd in range(7)]
     cells = {}
-    for wd, blk, dp, u in rows:
+    for wd, blk, dp, u, _d in rows:
         cells.setdefault((wd, blk), []).append((dp, u))
     grid = [[None] * (24 // BT_BLOCK_H) for _ in range(7)]
     for (wd, blk), lst in cells.items():
@@ -1330,7 +1333,7 @@ def by_time(ticks_):
         var = sum((u - rk * dp) ** 2 for dp, u in lst) / sy ** 2 * n / (n - 1) if n > 1 else rk ** 2
         se = max(math.sqrt(var), rk * TICK_SD_FLOOR / math.sqrt(n))
         grid[wd][blk] = {"per1": round(rk), "n": n, "pct": round(sy, 1), "err": round(1.645 * se)}
-    return {"per1": round(every), "ticks": len(rows), "block": BT_BLOCK_H, "grid": grid}
+    return {"per1": round(every), "ticks": len(rows), "block": BT_BLOCK_H, "grid": grid, "days": days}
 
 
 out_by_time = by_time(all_ticks)
