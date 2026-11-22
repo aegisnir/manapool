@@ -2,6 +2,12 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## Unreleased
+
+- **Band buttons are spaced out.**  ▤, ⓘ and ⊕/⊖ sat touching, so each was a small target; both band sizes now leave one cell between them.
+- **No lost presses during a refresh.**  The spinner turned about 6 times a second while a refresh ran, and every frame redrew the band and replaced its buttons, so a press often fell between two frames and did nothing (a refresh runs when a session opens and every 2 minutes).  The spinner now holds one glyph while it waits.
+- **`/manapool close`, `/manapool mini` and `/manapool full`.**  Close the manual and History panes, and set the band's size, from the prompt.  On Windows 10 a background session (and some terminal apps) runs on the system console, which drops mouse input, so a pane opened with `/manapool` could not be closed there.
+
 ## 0.7.14 (2026-11-19)
 
 - **Minority models show on the pace charts.**  On 5H pace and 7D pace, the band under each step is split by each model's share of the rise before it, stacked in Daily's order, so a model that helped but never did most of a rise still shows (a short Sonnet session beside a long Fable one was invisible).  The line keeps the leading model's colour.  The legend lists every model that did work here this window with its share of that work, biggest first ("Fable 94%, Sonnet 4%"), instead of only the models that led a rise.

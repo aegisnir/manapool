@@ -1533,7 +1533,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Reads:** `~/.claude/projects/**/*.jsonl` (Claude Code\'s transcripts, subagents included). Nothing is sent anywhere.')
   L.push('- **Keeps**: in `~/.claude/plugins/data/<plugin>/` (or under `CLAUDE_CONFIG_DIR`) the tick log `samples.jsonl` (one shared file, written under a lock; 5H and 7D readings kept 120 days), `scan-cache.json` (what was already read from each transcript, so a refresh reads only new lines; it lists each transcript\'s full path and the full path of the folder each session ran in), `ticks.json` (each meter tick\'s percent and work per model, kept 180 days) `history.json` (one row per day for the History pane: work per model, per project folder name and per hour; kept 400 days), and while the one-time history backfill is unfinished `backfill.lock` (one backfill at a time across sessions) and `backfill.json` (failures so far and when the next try may start: the wait doubles from 1 minute to a day), and `claims.json` (which 5H window the runs-out alert was last sent for, so only one session sends it); in the mod\'s store the ledger, the last numbers for an instant start, and each session\'s turns and alert state (removed after a week unused). Token counts, times, model names and file paths; no conversation text.')
   L.push('- **Refreshes:** only once the band or a pane has been shown, or after `/manapool` (sessions that never show it, such as `claude -p` runs, read nothing); then about 1.5 seconds after each turn; after a meter tick or a context change too, but at most once every 20 seconds (otherwise within 30 seconds); every 2 minutes when nothing happens. The cache clock redraws every 30 seconds.')
-  L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} history\` opens the History pane (also the ▤ button on the band). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification.`, '')
+  L.push(`- **Commands:** \`/${CMD}\` opens this pane and prints a short summary (runway and pills first, for a phone). \`/${CMD} history\` opens the History pane (also the ▤ button on the band). \`/${CMD} export\` writes the ledger CSV. \`/${CMD} test-notify\` sends a test system notification. \`/${CMD} close\` closes this pane and History, and \`/${CMD} mini\` or \`/${CMD} full\` sets the band's size (the ⊖ and ⊕ buttons), for terminals where clicks do not arrive.`, '')
   return L.join('\n')
 }
 
@@ -1957,7 +1957,10 @@ export const register: Register = on => {
         void refresh(io)
       }
       if (!spinning) return
-      await update($, spinAtom, f => ((f ?? 0) + 1) % 10)
+      // The spinner no longer turns: each frame redrew the whole band and
+      // replaced its buttons, so a press that landed between two frames was
+      // lost (a refresh runs when a session opens and every 2 minutes).
+      // spin() still shows one glyph while v.refreshing is set.
     })
     // Draw at once from the last saved numbers (this session's own turns when
     // it has run before), then the first real refresh replaces them.
@@ -1988,6 +1991,19 @@ export const register: Register = on => {
       let path = '~/Documents/Mana Pool/manapool-ledger.csv'
       try { path = JSON.parse(r.stdout).exported ?? path } catch { /* keep the short form */ }
       return { text: `Ledger written: ${path} (${ledger.length} windows).` }
+    }
+    // The panes and the band's ⊖/⊕ as commands, for terminals where clicks do
+    // not arrive (on Windows 10, a background session or Yaw: both run on the
+    // system console, which drops mouse input).  Otherwise a pane opened with
+    // `/manapool` has no way to close.
+    if (arg === 'close') {
+      await $.ui.close({ id: PANE }).catch(() => undefined)
+      await $.ui.close({ id: HPANE }).catch(() => undefined)
+      return { text: 'Mana Pool panes closed.' }
+    }
+    if (arg === 'mini' || arg === 'full') {
+      await update($, mode, () => arg)
+      return { text: `Mana Pool band set to ${arg === 'mini' ? 'Mini' : 'Full'}.` }
     }
     if (arg === 'history') {
       await $.ui.open({ id: HPANE, title: 'Mana Pool History' })
@@ -2106,7 +2122,7 @@ export const register: Register = on => {
     // would otherwise push the buttons off the right edge or wrap a row.
     const cols = (e.props.bodyColumns as number) || 90
     const tw = (s: string) => s.length * (Svg ? 0.72 : 1) // measured: 6.3 px a character at footnote size on the desktop
-    const ICONS_W = 9 // the three icon buttons (about 80 px on the desktop)
+    const ICONS_W = 11 // the three icon buttons and the 1-cell gaps between them (about 100 px on the desktop)
 
     // A usage bar: rounded gradient on graphical surfaces, flat blocks in a terminal.
     const bar = (frac: number, W: number, H: number, uid: string) => {
@@ -2273,7 +2289,7 @@ export const register: Register = on => {
               </Box>
             ) : null}
           </Box>
-          <Box alignItems="center" flexShrink={0}>
+          <Box alignItems="center" flexShrink={0} columnGap={1}>
             {icon('▤', 'History', openHistory)}
             {icon('ⓘ', 'Manual', openManual)}
             <Box>{icon('⊕', 'Expand', () => update($, mode, () => 'full'))}</Box>
@@ -2361,7 +2377,7 @@ export const register: Register = on => {
       <Box flexDirection="column" paddingX={1} width={CW + 2}>
         <Box justifyContent="space-between">
           <Box><Text size="footnote" weight="semibold">Mana Pool</Text>{version ? <Text size="footnote" dimColor>  v{version}</Text> : null}{spin()}</Box>
-          <Box>
+          <Box columnGap={1}>
             {icon('▤', 'History', openHistory)}
             {icon('ⓘ', 'Manual', openManual)}
             <Box>{icon('⊖', 'Collapse', () => update($, mode, () => 'mini'))}</Box>
