@@ -426,5 +426,7 @@ test('History 7D: a finished window colours by model from slimmed readings', asy
   const win = svgs.find(s => s.includes('Climb of each window')) ?? ''
   expect(win).toMatch(/stroke="#eac75e"/) // the Fable rise
   expect(win).toMatch(/stroke="#8d7cd5"/) // the Opus rise
+  // 0.7.17: the tooltip breaks the window down by model, biggest first
+  expect(win).toMatch(/Fable 76%[\s\S]*Opus 24%/)
   await ui.unmount()
 })

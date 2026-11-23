@@ -2,6 +2,11 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.17 (2026-11-22)
+
+- **5H windows tooltips break each window down by model.**  One line per model with its share of the work, biggest first, keyed in its colour ("Fable 76%", "Opus 24%"); on 30D and 90D, for the day's highest window, the one the bar shows.  The climb line's key takes the leading model's colour instead of violet.
+- **The 7D line stays behind the climbs.**  Climbs and bars are translucent, so the grey 7D line showed through them; each now sits on an opaque card-coloured base.
+
 ## 0.7.16 (2026-11-22)
 
 - **5H windows really show model colours.**  0.7.15 only coloured the open window: the scan sends finished windows' readings without their per-model figures (to keep each scan small), so every past climb stayed violet.  Finished 5H readings from the last 91 days now carry each model family's work so far, in thousands of units (about 20 bytes a reading), and the chart colours them from that.

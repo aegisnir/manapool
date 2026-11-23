@@ -1102,6 +1102,20 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       }
       // the models seen on show, for the legend; 'else' when a rise had no work here
       const seen = new Set<string>()
+      // Each model's share of a window's work, biggest first, for tooltips
+      // (0.7.17): from its readings when they have per-model figures, else
+      // the ledger's mix (scan.py _limitMix, mixed windows only).
+      const sharesOf = (w: W5): [string, number][] => {
+        const tot = mixOf(w)?.tot ?? {}, sum = Object.values(tot).reduce((a, b) => a + b, 0)
+        if (sum > 0) return Object.entries(tot).filter(([, u]) => u > 0).map(([k, u]) => [k, (u / sum) * 100] as [string, number]).sort((a, b) => b[1] - a[1])
+        const lm = v.limitMix?.[w.ra]
+        return lm ? Object.entries(lm).map(([m, p]) => [m.toLowerCase(), p] as [string, number]).sort((a, b) => b[1] - a[1]) : []
+      }
+      const tipShares = (w: W5): TipLine[] => {
+        const sh = sharesOf(w)
+        if (!sh.length) return w.models.length ? [w.models.join(' + ')] : []
+        return sh.map(([k, p]) => ({ s: `${nameOf(k)} ${p < 1 ? '<1' : Math.round(p)}%`, key: { col: modelCol(k) } }))
+      }
       // Gradient stops as percentages and one-decimal opacities: trim() cuts
       // every number in an attribute to one decimal, so 0.064 would become 0.0.
       const off = (y: number) => `${(Math.min(1, Math.max(0, (y - dotTop) / dotH)) * 100).toFixed(1)}%`
@@ -1179,6 +1193,9 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           if (!w.pts.length) d += ` V${syP(w.peak)}` // readings gone: the ledger's top reading
           d += ` H${sx(endT)}`
           const mx = w.pts.length ? mixOf(w) : null
+          // an opaque card-coloured silhouette first, so the 7D line behind
+          // never shows through the translucent climb
+          out += `<path d="${d} V${syP(0)} Z" fill="${CARD}"/>`
           if (mx) {
             // the same bands as 5H pace, a little stronger as the window nears 100%
             const ptsW: [number, number][] = [[a, 0], ...w.pts.map(([t, p]) => [Math.max(t0, t), p] as [number, number]), [endT, w.pts[w.pts.length - 1]![1]]]
@@ -1192,14 +1209,13 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           const cx = sx((a + endT) / 2)
           if (w.per1 > 0 && med) { pts.push([cx, syV(w.per1), w.sure]); dots += dot(cx, w.per1, w.sure) }
           const lines: TipLine[] = [`${stamp(w.st * 1000).replace(/ [A-Z]{2,5}$/, '')} to ${hm(w.end * 1000)}`,
-            { s: `Climbed to ${w.peak}%${w.peak >= 100 ? ' · limit reached' : ''}`, key: { col: ME } },
+            { s: `Climbed to ${w.peak}%${w.peak >= 100 ? ' · limit reached' : ''}`, key: { col: ((k?: string) => (k ? modelCol(k) : ME))(sharesOf(w)[0]?.[0]) } },
             ...tip7(endT),
             w.per1 > 0 && med ? { s: `${fmt(w.per1)} (${usd(w.per1)}) per 1% · ${vsTxt(w.per1)}${w.sure ? '' : ' · low confidence'}`, key: { col: colOf(w.per1), kind: w.sure ? 'dot' : 'ring' } }
               : { s: w.end > nowS ? 'Window still open' : 'Too little work to size', key: { col: DIM, kind: 'ring' } },
             // Mixed windows: each model's share of the limit used (scan.py
             // _limitMix), so a Fable-heavy window is plain on hover.
-            ...(v.limitMix?.[w.ra] ? [Object.entries(v.limitMix[w.ra]!).map(([m, p]) => `${m} ${p}%`).join(' · ')]
-              : w.models.length ? [w.models.join(' + ')] : []),
+            ...tipShares(w),
             ...(w.outside > 0 ? [`${w.outside}% elsewhere`] : [])]
           const xa = sx(a), xb = sx(endT)
           hv += hover(hitRect(xa, top, Math.max(3, xb - xa), base - top), `<rect x="${xa}" y="${top}" width="${Math.max(3, xb - xa)}" height="${base - top}" fill="${INK}" fill-opacity="0.1"/>`, tipBox((xa + xb) / 2, top, H, lines))
@@ -1227,6 +1243,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           const top1 = ws.find(w => w.peak === pk)!, mx = mixOf(top1)
           const g = mx ? mx.tot : {}, gs = Object.values(g).reduce((p, q) => p + q, 0)
           const hAll = Math.max(2, (pk / 100) * laneH), bx = x + (cw - bw) / 2
+          out += upBar(bx, syP(pk), bw, hAll, CARD) // masks the 7D line behind
           if (gs > 0) {
             const parts = [...MODEL_ORDER, ...Object.keys(g).filter(k => !MODEL_ORDER.includes(k))].filter(k => (g[k] ?? 0) > 0)
             let y = syP(0)
@@ -1249,7 +1266,8 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           const vals = ws.filter(w => w.per1 > 0).map(w => w.per1), pk = ws.length ? Math.max(...ws.map(w => w.peak)) : 0
           const before = dayOfKey(keys[z]!).setHours(24, 0, 0, 0) / 1000 <= first
           const lines: TipLine[] = before ? [name, 'No data'] : !ws.length ? [name, 'No use'] : [name, `${ws.length} ${ws.length === 1 ? 'window' : 'windows'}`,
-            { s: `Highest climb ${pk}%`, key: { col: ME } },
+            { s: `Highest climb ${pk}%`, key: { col: ((k?: string) => (k ? modelCol(k) : ME))(sharesOf(ws.find(w => w.peak === pk)!)[0]?.[0]) } },
+            ...tipShares(ws.find(w => w.peak === pk)!),
             ...tip7(Math.min(t1, dayOfKey(keys[z]!).setHours(24, 0, 0, 0) / 1000 - 1)),
             ...(vals.length && med ? [{ s: `${fmt(median(vals))} (${usd(median(vals))}) per 1% (middle) · ${vsTxt(median(vals))}`, key: { col: colOf(median(vals)), kind: 'dot' as const } },
               ...(vals.length > 1 ? [{ s: `Range ${fmt(Math.min(...vals))} to ${fmt(Math.max(...vals))}`, key: { col: DIM } }] : [])] : [])]
