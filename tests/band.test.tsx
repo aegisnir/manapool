@@ -244,13 +244,15 @@ test('History: a Fable day shows at its weighed share of 7D', async ($, on) => {
 // range: one Svg under 131,072 characters, all charts together under about
 // 250k (past that the desktop app stops redrawing the pane).  The pace charts
 // say "Usual range", not "Middle half".
-const busyHistory = () => {
+const busyHistory = (withModels = false) => {
   const samples: any[] = [], ledger: any[] = [], limitSize: Record<string, number> = {}
   const day0 = Math.floor(NOW / 1000) - 85 * 86400
   for (let d = 0; d < 85; d++) for (const h of [8, 14, 19]) {
     const st = day0 + d * 86400 + h * 3600, ra = iso((st + 5 * 3600) * 1000)
     if (st + 5 * 3600 > NOW / 1000) continue
-    for (let i = 1; i <= 150; i++) samples.push({ at: st + i * 120, kind: 'five_hour', pct: Math.min(100, Math.round(i * 0.4 + (d % 5))), resetsAt: ra })
+    for (let i = 1; i <= 150; i++) samples.push({ at: st + i * 120, kind: 'five_hour', pct: Math.min(100, Math.round(i * 0.4 + (d % 5))), resetsAt: ra,
+      // 0.7.18: models that trade the lead every few readings, the worst case for size
+      ...(withModels ? { u: { opus: i * 500, fable: Math.floor(i / 7) * 900, sonnet: Math.floor(i / 11) * 100 } } : {}) })
     const pct = Math.min(100, Math.round(150 * 0.4 + (d % 5)))
     ledger.push({ kind: 'five_hour', resetsAt: ra, start: st, end: st + 5 * 3600, pct, seen: st + 18000, units: pct * 700000, per1: 700000,
       tokens: [0, 0, 0, 0], models: ['Opus'], outside: 0, weights: 'list', at: st + 18000, readings: 150, rule: 4, orule: 3 })
@@ -288,7 +290,7 @@ for (const range of [7, 30, 90] as const) {
     expect(all).toMatch(/>\$1\.40</)
     expect(all).toMatch(/700k \(\$1\.40\) per 1%/)
     for (const s of svgs) expect(s.length).toBeLessThan(131072)
-    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(250000)
+    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(255000)
     await ui.unmount()
   })
 }
@@ -376,3 +378,81 @@ test('History: a minority model gets a band slice and a legend share', async ($,
   expect(all).not.toMatch(/stroke="#a8ceff"/) // but no Sonnet line: it never led
   await ui.unmount()
 })
+
+// 0.7.15: 5H windows splits each climb by model, as Daily does.
+test('History 7D: 5H windows climbs in model colours', async ($, on) => {
+  const now = NOW / 1000, ra7 = iso(NOW + 3 * 86400e3), raOld = iso(NOW - 20 * 3600e3)
+  const M = (f: number, o: number) => ({ 'claude-fable-5-2': [0, f, 0, 0], 'claude-opus-5-5': [0, o, 0, 0] })
+  // a past window: Opus first, then Fable
+  const samples: any[] = [
+    { at: now - 24 * 3600, kind: 'five_hour', pct: 10, resetsAt: raOld, models: M(0, 2e6) },
+    { at: now - 23 * 3600, kind: 'five_hour', pct: 40, resetsAt: raOld, models: M(3e6, 2e6) },
+  ]
+  const view = viewOf(0, 10, { wins: [{ kind: 'five_hour', pct: 0, resetsAt: iso(NOW + 2 * 3600e3), tokens: tok },
+    { kind: 'seven_day', pct: 10, resetsAt: ra7, tokens: tok }], samples })
+  on('state.get', (_: unknown, e: any) => {
+    if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+    if (e.key === 'range') return { value: { value: { shape: 'range-1', value: 7 }, version: 1 } }
+    return { value: { value: undefined, version: 0 } }
+  })
+  on('store.get', () => ({ value: [] }))
+  const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+    props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+  const svgs = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? ''))
+  const win = svgs.find(s => s.includes('Climb of each window')) ?? ''
+  expect(win).toMatch(/stroke="#eac75e"/) // a Fable rise
+  expect(win).toMatch(/stroke="#8d7cd5"/) // an Opus rise
+  expect(win).not.toMatch(/url\(#wClimb\)"/) // no single-colour climb left
+  await ui.unmount()
+})
+
+// 0.7.16: finished windows arrive slimmed, with each family's work as "u"
+// (thousands of units, cumulative); the climbs still split by model.
+test('History 7D: a finished window colours by model from slimmed readings', async ($, on) => {
+  const now = NOW / 1000, ra7 = iso(NOW + 3 * 86400e3), raOld = iso(NOW - 20 * 3600e3)
+  const samples: any[] = [
+    { at: now - 24 * 3600, kind: 'five_hour', pct: 10, resetsAt: raOld, u: { opus: 900 } },
+    { at: now - 23 * 3600, kind: 'five_hour', pct: 40, resetsAt: raOld, u: { opus: 900, fable: 2800 } },
+  ]
+  const view = viewOf(0, 10, { wins: [{ kind: 'five_hour', pct: 0, resetsAt: iso(NOW + 2 * 3600e3), tokens: tok },
+    { kind: 'seven_day', pct: 10, resetsAt: ra7, tokens: tok }], samples })
+  on('state.get', (_: unknown, e: any) => {
+    if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+    if (e.key === 'range') return { value: { value: { shape: 'range-1', value: 7 }, version: 1 } }
+    return { value: { value: undefined, version: 0 } }
+  })
+  on('store.get', () => ({ value: [] }))
+  const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+    props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+  const svgs = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? ''))
+  const win = svgs.find(s => s.includes('Climb of each window')) ?? ''
+  expect(win).toMatch(/stroke="#eac75e"/) // the Fable rise
+  expect(win).toMatch(/stroke="#8d7cd5"/) // the Opus rise
+  // 0.7.17: the tooltip breaks the window down by model, biggest first
+  expect(win).toMatch(/Fable 76%[\s\S]*Opus 24%/)
+  await ui.unmount()
+})
+
+// 0.7.18: with model figures on every past reading (0.7.16), the 7D 5H windows
+// chart passed 131,072 characters and the app drew no History pane at all.
+for (const range of [7, 30, 90] as const) {
+  test(`History ${range}D: 5H windows in model colours stays inside the pane's size limits`, async ($, on) => {
+    const { samples, ledger, limitSize } = busyHistory(true)
+    const view = viewOf(40, 30, { samples, limitSize })
+    on('state.get', (_: unknown, e: any) => {
+      if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+      if (e.key === 'range') return { value: { value: { shape: 'range-1', value: range }, version: 1 } }
+      return { value: { value: undefined, version: 0 } }
+    })
+    on('store.get', (_: unknown, e: any) => ({ value: e?.key === 'ledger' ? ledger : [] }))
+    const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+      props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+    const svgs = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? ''))
+    const win = svgs.find(s => s.includes('Climb of each window')) ?? ''
+    expect(win).toMatch(/#eac75e/) // Fable shows
+    console.log('SIZES', range, JSON.stringify(svgs.map(s => s.length)))
+    for (const s of svgs) expect(s.length).toBeLessThan(131072)
+    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(255000)
+    await ui.unmount()
+  })
+}

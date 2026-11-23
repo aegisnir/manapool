@@ -8,6 +8,30 @@ All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/p
 - **No lost presses during a refresh.**  The spinner turned about 6 times a second while a refresh ran, and every frame redrew the band and replaced its buttons, so a press often fell between two frames and did nothing (a refresh runs when a session opens and every 2 minutes).  The spinner now holds one glyph while it waits.
 - **`/manapool close`, `/manapool mini` and `/manapool full`.**  Close the manual and History panes, and set the band's size, from the prompt.  On Windows 10 a background session (and some terminal apps) runs on the system console, which drops mouse input, so a pane opened with `/manapool` could not be closed there.
 
+## 0.7.19 (2026-11-22)
+
+- **History pane draws again, for real.**  The app draws nothing once all the pane's charts together pass 262,144 characters.  On a busy month at 30D the pane was already near it (254,712 in 0.7.14), and the model-coloured 5H windows took it to 262,729.  Hours, the biggest chart, is now about 20% smaller: empty cells have no tooltip (it only said "No work"), and a cell's hover target outlines itself instead of carrying a second shape.  The same month now comes to 244,920.
+- **A guard for the whole pane.**  Charts are counted top to bottom, and one that would take the pane past 255,000 characters (or itself past 131,072) is left out with "Too much to draw at this range", so the rest always draws.
+
+## 0.7.18 (2026-11-22)
+
+- **History pane draws again.**  Since 0.7.16 every past 5H reading carries model figures, and the 7D 5H windows chart, split into a band slice per reading per model, passed the 131,072 characters one chart may have.  The app then refused the whole pane, so it showed nothing.  The 7D climbs now draw each run of rises led by one model as one shape in its colour (79k characters on the busiest test week); the tooltip still gives every model's share.
+- **One oversized chart no longer blanks the pane.**  A chart past the limit is left out with "Too much to draw at this range", and the others still show.
+
+## 0.7.17 (2026-11-22)
+
+- **5H windows tooltips break each window down by model.**  One line per model with its share of the work, biggest first, keyed in its colour ("Fable 76%", "Opus 24%"); on 30D and 90D, for the day's highest window, the one the bar shows.  The climb line's key takes the leading model's colour instead of violet.
+- **The 7D line stays behind the climbs.**  Climbs and bars are translucent, so the grey 7D line showed through them; each now sits on an opaque card-coloured base.
+
+## 0.7.16 (2026-11-22)
+
+- **5H windows really show model colours.**  0.7.15 only coloured the open window: the scan sends finished windows' readings without their per-model figures (to keep each scan small), so every past climb stayed violet.  Finished 5H readings from the last 91 days now carry each model family's work so far, in thousands of units (about 20 bytes a reading), and the chart colours them from that.
+
+## 0.7.15 (2026-11-22)
+
+- **5H windows in model colours.**  The climb lane is split by model the way Daily is.  7D: each window's climb is banded by each model's share of every rise (the 5H pace bands), the line in the colour of the model that led it.  30D and 90D: the day's highest climb is a stacked bar, one segment per model in Daily's order, sized by that window's share of the work (at the weights in use).  Climbs still get stronger from 50%.  The legend names the models on show; windows whose readings have no per-model figures (before 0.7.1) stay violet.
+- **7D is dark grey, not blue.**  The 7D meter behind the 5H climbs (and 7D pace's line when readings have no per-model figures) was blue, too close to Sonnet's.  It is now a quiet dark grey: behind the climbs it only shows how they overlap 7D, and 7D pace above is the full chart.
+
 ## 0.7.14 (2026-11-19)
 
 - **Minority models show on the pace charts.**  On 5H pace and 7D pace, the band under each step is split by each model's share of the rise before it, stacked in Daily's order, so a model that helped but never did most of a rise still shows (a short Sonnet session beside a long Fable one was invisible).  The line keeps the leading model's colour.  The legend lists every model that did work here this window with its share of that work, biggest first ("Fable 94%, Sonnet 4%"), instead of only the models that led a rise.

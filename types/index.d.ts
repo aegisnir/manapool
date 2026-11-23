@@ -12,7 +12,7 @@ export type Tokens = {
 export type Win = { kind: string; pct: number; resetsAt?: string; tokens: Tokens }
 // One real tick of a meter: the window's totals at the moment its percent moved.
 // lu = list units of the window so far (for the hundredths and the audit).
-export type Sample = { at: number; kind: string; pct: number; fresh?: number; lu?: number; resetsAt?: string; mix?: number[]; models?: Record<string, number[]> }
+export type Sample = { at: number; kind: string; pct: number; fresh?: number; lu?: number; resetsAt?: string; mix?: number[]; models?: Record<string, number[]>; u?: Record<string, number> }
 // One turn of this session (your message plus the full reply, subagents included).
 // u = its work units, h = the part spent re-reading the old conversation,
 // f = the same turn in a fresh session after a hand-off, n = model calls.

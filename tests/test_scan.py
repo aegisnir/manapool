@@ -602,7 +602,7 @@ os.makedirs(dd)
 ra60 = iso(NOW - 60 * 86400 + 3600)
 old = [{"at": NOW - 60 * 86400, "kind": "seven_day", "pct": 50, "resetsAt": iso(NOW - 55 * 86400)},
        {"at": NOW - 60 * 86400 - 600, "kind": "five_hour", "pct": 40, "resetsAt": ra60, "lu": 0, "models": {}},
-       {"at": NOW - 60 * 86400, "kind": "five_hour", "pct": 50, "resetsAt": ra60, "lu": 0, "models": {}},
+       {"at": NOW - 60 * 86400, "kind": "five_hour", "pct": 50, "resetsAt": ra60, "lu": 0, "models": {"claude-fable-5-2": [0, 1000000, 0, 0]}},
        {"at": NOW - 200 * 86400, "kind": "five_hour", "pct": 30, "resetsAt": iso(NOW - 200 * 86400 + 3600)},
        {"at": NOW - 200 * 86400, "kind": "seven_day", "pct": 40, "resetsAt": iso(NOW - 195 * 86400)}]
 with open(os.path.join(dd, "samples.jsonl"), "w") as f:
@@ -611,7 +611,9 @@ with open(os.path.join(dd, "samples.jsonl"), "w") as f:
 d = run_ny([NOW - 3600, f"--now={NOW}", f"--data-dir={dd}"])
 kinds = sorted((s["kind"], s["pct"]) for s in d.get("_samples", []))
 check("tick log: 60-day-old readings stay, 200-day ones go", kinds, [("five_hour", 40), ("five_hour", 50), ("seven_day", 50)])
-check("tick log: a finished window's readings go out slimmed", sorted(next(s for s in d["_samples"] if s["kind"] == "five_hour")), ["at", "kind", "pct", "resetsAt", "ts"])
+check("tick log: a finished window's readings go out slimmed", sorted(next(s for s in d["_samples"] if s["kind"] == "five_hour")), ["at", "kind", "pct", "resetsAt", "ts", "u"])
+check("tick log: a reading with no work here has no families", next(s for s in d["_samples"] if s["kind"] == "five_hour")["u"], {})
+check("tick log: a finished 5H reading keeps its families' work (0.7.16)", sorted(next(s for s in d["_samples"] if s["kind"] == "five_hour" and s["pct"] == 50)["u"]), ["fable"])
 check("old 5H window without transcripts: no ledger row", [r for r in d.get("_ledgerNew", []) if r.get("resetsAt") == ra60], [])
 check("old 5H window without transcripts: no elsewhere", any(b.get("e") for b in d["_history"]["days"].values()), False)
 check("old 5H window without transcripts: no limit size", ra60 in (d.get("_limitSize") or {}), False)
