@@ -2,6 +2,11 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.18 (2026-11-22)
+
+- **History pane draws again.**  Since 0.7.16 every past 5H reading carries model figures, and the 7D 5H windows chart, split into a band slice per reading per model, passed the 131,072 characters one chart may have.  The app then refused the whole pane, so it showed nothing.  The 7D climbs now draw each run of rises led by one model as one shape in its colour (79k characters on the busiest test week); the tooltip still gives every model's share.
+- **One oversized chart no longer blanks the pane.**  A chart past the limit is left out with "Too much to draw at this range", and the others still show.
+
 ## 0.7.17 (2026-11-22)
 
 - **5H windows tooltips break each window down by model.**  One line per model with its share of the work, biggest first, keyed in its colour ("Fable 76%", "Opus 24%"); on 30D and 90D, for the day's highest window, the one the bar shows.  The climb line's key takes the leading model's colour instead of violet.

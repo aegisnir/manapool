@@ -1100,6 +1100,28 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         const shAll = [sh[0]!, ...sh, sh[sh.length - 1]!]
         return { ks: shAll.map(leadOf), sh: shAll, tot: prev }
       }
+      // A step climb in model colours, compact: one fill and one line path per
+      // colour.  The stretch after reading i takes ks[i] (the model behind the
+      // rise into it); a run of stretches in one colour is one shape, its
+      // outline starting with the rise into the run.
+      const runSteps = (pts: [number, number][], ks: string[], sx: (t: number) => number, sy: (p: number) => number, base: number, op: number) => {
+        const fill: Record<string, string> = {}, line: Record<string, string> = {}
+        const X = (i: number) => r1(sx(pts[i]![0])), Y = (i: number) => r1(sy(pts[i]![1]))
+        let i = 0
+        while (i < pts.length - 1) {
+          const k = ks[i]!
+          let e = i
+          while (e + 1 < pts.length - 1 && ks[e + 1] === k) e++
+          // stretches i..e (each from point j to j+1 at point j's height)
+          let top = ''
+          for (let j = i; j <= e; j++) top += `V${Y(j)}H${X(j + 1)}`
+          fill[k] = (fill[k] ?? '') + `M${X(i)},${r1(base)}${top}V${r1(base)}Z`
+          line[k] = (line[k] ?? '') + `M${X(i)},${i > 0 ? Y(i - 1) : r1(base)}${top}`
+          i = e + 1
+        }
+        return Object.entries(fill).map(([k, d]) => `<path d="${d}" fill="${modelCol(k)}" fill-opacity="${op}"/>`).join('') +
+          Object.entries(line).map(([k, d]) => `<path d="${d}" fill="none" stroke="${modelCol(k)}" stroke-width="1.5" stroke-linejoin="round"/>`).join('')
+      }
       // the models seen on show, for the legend; 'else' when a rise had no work here
       const seen = new Set<string>()
       // Each model's share of a window's work, biggest first, for tooltips
@@ -1197,9 +1219,14 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           // never shows through the translucent climb
           out += `<path d="${d} V${syP(0)} Z" fill="${CARD}"/>`
           if (mx) {
-            // the same bands as 5H pace, a little stronger as the window nears 100%
+            // Each run of rises led by one model is one shape in its colour,
+            // a little stronger as the window nears 100% (0.7.18).  5H pace's
+            // per-reading split bands made this chart pass the 131,072
+            // characters an Svg may have once every past window had model
+            // figures, and the app then drew no History pane at all.  The
+            // minority models are in the tooltip.
             const ptsW: [number, number][] = [[a, 0], ...w.pts.map(([t, p]) => [Math.max(t0, t), p] as [number, number]), [endT, w.pts[w.pts.length - 1]![1]]]
-            out += modelSteps(ptsW, mx, sx, syP, syP(0), +(+climbOp(w.peak) * 0.7).toFixed(1), 1.5)
+            out += runSteps(ptsW, mx.ks, sx, syP, syP(0), +(+climbOp(w.peak) * 0.7).toFixed(1))
             if (endT < t1) out += `<line x1="${sx(endT)}" x2="${sx(endT)}" y1="${syP(ptsW[ptsW.length - 1]![1])}" y2="${syP(0)}" stroke="${modelCol(lastModel(mx.ks))}" stroke-width="1.5"/>`
             mx.ks.forEach(k => seen.add(k))
           } else {
@@ -1555,7 +1582,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading). Hatched on top: **elsewhere**, each elsewhere point times its window\'s work per 1%, on the day of the reading that showed it (the tooltip says "since" when it started on an earlier day). Elsewhere only shows between two readings, so a day with none says **not measured**.')
   L.push('- **5H pace**: this window\'s readings against past windows, with the projection to 100% and an even pace (dashed: 100% at reset). Clock times sit under the hours. Usual is the middle past window at each minute; the usual range is the middle half of them. Both follow the range buttons: the windows that started in the last 7, 30 or 90 days. The line is in model colours, as in Daily: each rise takes the colour of the model that did most of the work behind it (weighed at the weights in use), and the band below each flat stretch is split by each model\'s share of the rise before it, so a model that helped but never led still shows. The legend lists every model that did work here this window with its share of that work. A rise with no work here is grey, **Elsewhere**. The projection and the dot take the colour of the last model that did work here. Sonnet is blue, Mythos orange, and a model with no list price grey, **Other**.')
   L.push('- **7D pace** (in model colours, as in 5H pace): this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
-  L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb), with the 7D meter behind it in dark grey on the same scale (it drops to 0 where 7D resets). Climbs are in model colours, as in Daily: 7D bands each rise by each model\'s share of it (as 5H pace); 30D and 90D stack the day\'s highest climb by its window\'s share of work per model. A window whose readings have no per-model figures stays violet. A climb gets stronger from 50% and is solid at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
+  L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb), with the 7D meter behind it in dark grey on the same scale (it drops to 0 where 7D resets). Climbs are in model colours, as in Daily: 7D colours each rise by the model that did most of it; 30D and 90D stack the day\'s highest climb by its window\'s share of work per model. A window whose readings have no per-model figures stays violet. Tooltips list each model\'s share of the window (30D and 90D: of the day\'s highest window). A chart too big for the pane to draw is left out with a note, so the rest still shows. A climb gets stronger from 50% and is solid at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
   L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the usual figure (kept 180 days, so the range buttons do not change it). Green is a bigger limit, red a smaller one, as in 5H windows. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. Usual is all kept ticks pooled. Same colour rules as 5H windows: faint at usual, full colour at 10% off, and the header names a slot only at 15% or more. A cell is an outline, too little data to trust, when it pools under 3 days or its 90% range is wider than 15%. The range is measured between days, not ticks: ticks from one session share its models and way of working, so a single busy morning is one sample however many ticks it has. This measures how much the limit holds at that time, not how much you got done. A row pools every matching weekday, so the right edge says how many days went in, not a date.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
@@ -2642,7 +2669,10 @@ export const register: Register = on => {
           <Text size="footnote" weight="semibold">{title}</Text>
           {c.right ? <Text size="footnote" color={c.rightBad ? RED : undefined} dimColor={!c.rightBad}>{c.right}</Text> : null}
         </Box>
-        <Svg source={c.svg} alt={c.alt} isInteractive {...dims(c.svg)} />
+        {/* An Svg past 131,072 characters makes the app refuse the whole
+            pane (0.7.18), so a chart that grew too big is left out alone. */}
+        {c.svg.length < 131072 ? <Svg source={c.svg} alt={c.alt} isInteractive {...dims(c.svg)} />
+          : <Text size="footnote" dimColor>Too much to draw at this range</Text>}
         {legend(c.legend)}
       </Box>
     ) : null
