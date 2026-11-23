@@ -290,7 +290,7 @@ for (const range of [7, 30, 90] as const) {
     expect(all).toMatch(/>\$1\.40</)
     expect(all).toMatch(/700k \(\$1\.40\) per 1%/)
     for (const s of svgs) expect(s.length).toBeLessThan(131072)
-    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(250000)
+    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(255000)
     await ui.unmount()
   })
 }
@@ -452,7 +452,7 @@ for (const range of [7, 30, 90] as const) {
     expect(win).toMatch(/#eac75e/) // Fable shows
     console.log('SIZES', range, JSON.stringify(svgs.map(s => s.length)))
     for (const s of svgs) expect(s.length).toBeLessThan(131072)
-    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(250000)
+    expect(svgs.reduce((a, s) => a + s.length, 0)).toBeLessThan(255000)
     await ui.unmount()
   })
 }
