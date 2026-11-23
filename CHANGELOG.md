@@ -2,6 +2,11 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.15 (2026-11-22)
+
+- **5H windows in model colours.**  The climb lane is split by model the way Daily is.  7D: each window's climb is banded by each model's share of every rise (the 5H pace bands), the line in the colour of the model that led it.  30D and 90D: the day's highest climb is a stacked bar, one segment per model in Daily's order, sized by that window's share of the work (at the weights in use).  Climbs still get stronger from 50%.  The legend names the models on show; windows whose readings have no per-model figures (before 0.7.1) stay violet.
+- **7D is dark grey, not blue.**  The 7D meter behind the 5H climbs (and 7D pace's line when readings have no per-model figures) was blue, too close to Sonnet's.  It is now a quiet dark grey: behind the climbs it only shows how they overlap 7D, and 7D pace above is the full chart.
+
 ## 0.7.14 (2026-11-19)
 
 - **Minority models show on the pace charts.**  On 5H pace and 7D pace, the band under each step is split by each model's share of the rise before it, stacked in Daily's order, so a model that helped but never did most of a rise still shows (a short Sonnet session beside a long Fable one was invisible).  The line keeps the leading model's colour.  The legend lists every model that did work here this window with its share of that work, biggest first ("Fable 94%, Sonnet 4%"), instead of only the models that led a rise.

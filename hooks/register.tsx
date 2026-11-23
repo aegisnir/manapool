@@ -149,6 +149,12 @@ const DIM = '#9b99a1'     // caption grey
 // words are main text (APCA Lc 87 to 89, where coloured words were 43 to 66).
 const LVL = ['#35d399', '#79b4fe', '#fbbf25', '#f8707a']
 const COLD = '#79b4fe'    // the prompt cache has expired
+// 7D in the History pane (0.7.15): a dark grey, behind the 5H climbs and on
+// 7D pace.  Was COLD's blue, too close to Sonnet's.  Behind the climbs it is
+// only context (7D pace above is the real chart), so it stays quiet.  Checked
+// with the dataviz validator's CVD sims: dE >= 7.9 from Other's grey, the
+// nearest colour; Other is rare and a filled bar, this a thin line.
+const SEVEN = '#4a4852'
 const WARM = '#f6b26b'    // the prompt cache is active
 const SEP = '#48464d'     // the hairline between band sections
 
@@ -764,6 +770,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   }
   const colOf = (k: string) => (k === 'else' ? DIM : MODEL_COL[k] ?? MODEL_COL.other!)
   const nameOf = (k: string) => (k === 'else' ? 'Elsewhere' : cap(k))
+  const modelCol = colOf // 5H windows has its own colOf (limit colours)
   // The model behind each point of a step line: pts[0] is the window's start,
   // the last point the live estimate (its work: the window's live totals).
   // ks: the model that did most of the work behind each point.  sh: the work
@@ -793,7 +800,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   // morning's).  Each model's bands are one fill path and runs of one line
   // colour one line path, so the chart stays inside the pane's size limits
   // however many readings there are.
-  const modelSteps = (pts: [number, number][], mx: Mix, sx: (n: number) => number, sy: (p: number) => number, base: number) => {
+  const modelSteps = (pts: [number, number][], mx: Mix, sx: (n: number) => number, sy: (p: number) => number, base: number, op = 0.3, lw = 2) => {
     const { ks, sh } = mx
     type Piece = { k: string; d: string }
     const lines: Piece[] = [], fills: Record<string, string> = {}
@@ -819,8 +826,8 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         y = y2
       }
     }
-    const area = Object.entries(fills).map(([k, d]) => `<path d="${d}" fill="${colOf(k)}" fill-opacity="0.3"/>`).join('')
-    return area + lines.map(l => `<path d="${l.d}" fill="none" stroke="${colOf(l.k)}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join('')
+    const area = Object.entries(fills).map(([k, d]) => `<path d="${d}" fill="${colOf(k)}" fill-opacity="${op}"/>`).join('')
+    return area + lines.map(l => `<path d="${l.d}" fill="none" stroke="${colOf(l.k)}" stroke-width="${lw}" stroke-linejoin="round" stroke-linecap="round"/>`).join('')
   }
   // The legend (0.7.14): every model that did work here this window, with its
   // share of that work (at the weights in use), biggest first, then
@@ -830,7 +837,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const sum = Object.values(mx.tot).reduce((a, b) => a + b, 0)
     const ms = Object.entries(mx.tot).filter(([, u]) => u > 0).sort((a, b) => b[1] - a[1])
       .map(([k, u]) => { const p = (u / sum) * 100; return { name: `${nameOf(k)} ${p < 1 ? '<1' : Math.round(p)}%`, col: colOf(k) } })
-    return mx.ks.includes('else') ? [...ms, { name: nameOf('else'), col: colOf('else') }] : ms
+    return mx.ks.includes('else') ? [...ms, { name: nameOf('else'), col: modelCol('else') }] : ms
   }
   // The projection and the "now" dot take the last model that did work here
   // (0.7.12): the pace ahead is that model's.  Elsewhere is skipped; a window
@@ -928,8 +935,8 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
   let pace7: Chart | null = null
   if (w7?.resetsAt) {
     const H = 124 + AXIS2, x0 = 34, top = 8, base = H - 16 - AXIS2, DAY = 86400
-    // 7D is blue everywhere (5H violet), here and behind the 5H windows
-    const C7 = COLD
+    // 7D is one colour everywhere (SEVEN), here and behind the 5H windows
+    const C7 = SEVEN
     const sx = (dd: number) => x0 + (dd / 7) * (HW - x0 - 4), sy = (p: number) => base - (Math.min(100, p) / 100) * (base - top)
     const byWin = new Map<string, Sample[]>()
     for (const s of v.samples) if (s.kind === 'seven_day' && s.resetsAt) byWin.set(s.resetsAt, [...(byWin.get(s.resetsAt) ?? []), s])
@@ -1031,7 +1038,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
     const adj = v.limitSize
     const DAY = 86400
     // Every 5H window known: its readings (kept 120 days) and its ledger row.
-    type W5 = { ra: string; st: number; end: number; pts: [number, number][]; peak: number; per1: number; sure: boolean; models: string[]; outside: number }
+    type W5 = { ra: string; st: number; end: number; pts: [number, number][]; ss: Sample[]; peak: number; per1: number; sure: boolean; models: string[]; outside: number }
     const rows5 = new Map<string, LedgerRow>()
     for (const r of ledger) if (r.kind === 'five_hour' && current(r)) rows5.set(r.resetsAt, r)
     const reads = new Map<string, Sample[]>()
@@ -1041,13 +1048,13 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const end = Date.parse(ra) / 1000, st = end - SPAN.five_hour, r = rows5.get(ra)
       // the climb, thinned to one point per 5 minutes (the last, so the highest):
       // every reading as a step would make the 7D drawing too big for the pane
-      const thin = new Map<number, [number, number]>()
-      for (const x of (reads.get(ra) ?? []).sort((a, b) => a.at - b.at)) thin.set(Math.floor((x.at - st) / 300), [x.at, x.pct])
-      const pts = [...thin.values()]
+      const thin = new Map<number, Sample>()
+      for (const x of (reads.get(ra) ?? []).sort((a, b) => a.at - b.at)) thin.set(Math.floor((x.at - st) / 300), x)
+      const ss = [...thin.values()], pts = ss.map(x => [x.at, x.pct] as [number, number])
       const peak = Math.max(r?.pct ?? 0, ...pts.map(q => q[1]))
       if (peak <= 0) continue
       const per1 = r ? (adj ? (adj[ra] ?? 0) : herePer1(r)) : 0
-      all.push({ ra, st, end, pts, peak, per1, sure: !!r && herePts(r) >= 15, models: r?.models ?? [], outside: r?.outside ?? 0 })
+      all.push({ ra, st, end, pts, ss, peak, per1, sure: !!r && herePts(r) >= 15, models: r?.models ?? [], outside: r?.outside ?? 0 })
     }
     all.sort((a, b) => a.st - b.st)
     if (all.length) {
@@ -1077,6 +1084,19 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       // 100%, so a window near the limit stands out without a second colour
       // (red is kept for "smaller limit").  One decimal, as trim() keeps.
       const climbOp = (pk: number) => (0.5 + 0.5 * Math.min(1, Math.max(0, (pk - 50) / 50))).toFixed(1)
+      // Model colours (0.7.15), as Daily: each window's climb split by the
+      // models that did the work behind it, read from the per-model figures its
+      // readings carry (cumulative since the window started).  A window whose
+      // readings have none (before 0.7.1, or readings gone) stays violet.
+      const mixOf = (w: W5): Mix | null => {
+        if (!w.ss.length || w.ss.some(s => !s.models)) return null
+        let prev: Record<string, number> = {}
+        const sh = w.ss.map(s => { const u = unitsOf(s.models!); const g = gainOf(prev, u); prev = u; return g })
+        const shAll = [sh[0]!, ...sh, sh[sh.length - 1]!]
+        return { ks: shAll.map(leadOf), sh: shAll, tot: prev }
+      }
+      // the models seen on show, for the legend; 'else' when a rise had no work here
+      const seen = new Set<string>()
       // Gradient stops as percentages and one-decimal opacities: trim() cuts
       // every number in an attribute to one decimal, so 0.064 would become 0.0.
       const off = (y: number) => `${(Math.min(1, Math.max(0, (y - dotTop) / dotH)) * 100).toFixed(1)}%`
@@ -1105,7 +1125,7 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         out += `<rect x="${x0}" y="${top}" width="${xa - x0}" height="${base - top}" fill="url(#wNone)"/>`
         if (xa - x0 > 70) out += label((x0 + xa) / 2, top + laneH / 2, 'No data', 'middle')
       }
-      // 7D behind the climbs, in blue on the same 0-100% scale: its readings as
+      // 7D behind the climbs, in SEVEN dark grey on the same 0-100% scale: its readings as
       // steps, dropping to 0 where a 7D window resets.  Thinned to one reading
       // per 30 minutes (7D) or 6 hours (30D, 90D): the History pane stops
       // redrawing past ~250k characters in all (see HOVER_CSS).
@@ -1130,9 +1150,9 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
         let d7 = `M${sx(p7[0]![0])},${syP(p7[0]![1])}`
         for (const [t, p] of p7.slice(1)) d7 += ` H${sx(t)} V${syP(p)}`
         d7 += ` H${sx(t1)}`
-        back7 = `<path d="${d7} V${syP(0)} H${sx(p7[0]![0])} Z" fill="${COLD}" fill-opacity="0.14"/><path d="${d7}" fill="none" stroke="${COLD}" stroke-width="1.5" stroke-opacity="0.8" stroke-linejoin="round"/>`
+        back7 = `<path d="${d7} V${syP(0)} H${sx(p7[0]![0])} Z" fill="${SEVEN}" fill-opacity="0.2"/><path d="${d7}" fill="none" stroke="${SEVEN}" stroke-width="1.5" stroke-linejoin="round"/>`
       }
-      const tip7 = (t: number): TipLine[] => { const p = at7(t); return p === null ? [] : [{ s: `7D ${Math.round(p)}%`, key: { col: COLD } }] }
+      const tip7 = (t: number): TipLine[] => { const p = at7(t); return p === null ? [] : [{ s: `7D ${Math.round(p)}%`, key: { col: SEVEN } }] }
       // the waveform's points, in time order: [x, y, solid]
       const pts: [number, number, boolean][] = []
       let dots = '', hv = ''
@@ -1153,7 +1173,17 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           for (const [t, p] of w.pts) d += ` H${sx(Math.max(t0, t))} V${syP(p)}`
           if (!w.pts.length) d += ` V${syP(w.peak)}` // readings gone: the ledger's top reading
           d += ` H${sx(endT)}`
-          out += `<path d="${d} V${syP(0)} Z" fill="url(#wClimb)" fill-opacity="${climbOp(w.peak)}"/><path d="${d}${endT < t1 ? ` V${syP(0)}` : ''}" fill="none" stroke="${ME}" stroke-width="1.5" stroke-linejoin="round"/>`
+          const mx = w.pts.length ? mixOf(w) : null
+          if (mx) {
+            // the same bands as 5H pace, a little stronger as the window nears 100%
+            const ptsW: [number, number][] = [[a, 0], ...w.pts.map(([t, p]) => [Math.max(t0, t), p] as [number, number]), [endT, w.pts[w.pts.length - 1]![1]]]
+            out += modelSteps(ptsW, mx, sx, syP, syP(0), +(+climbOp(w.peak) * 0.7).toFixed(1), 1.5)
+            if (endT < t1) out += `<line x1="${sx(endT)}" x2="${sx(endT)}" y1="${syP(ptsW[ptsW.length - 1]![1])}" y2="${syP(0)}" stroke="${modelCol(lastModel(mx.ks))}" stroke-width="1.5"/>`
+            mx.ks.forEach(k => seen.add(k))
+          } else {
+            out += `<path d="${d} V${syP(0)} Z" fill="url(#wClimb)" fill-opacity="${climbOp(w.peak)}"/><path d="${d}${endT < t1 ? ` V${syP(0)}` : ''}" fill="none" stroke="${ME}" stroke-width="1.5" stroke-linejoin="round"/>`
+            seen.add('violet')
+          }
           const cx = sx((a + endT) / 2)
           if (w.per1 > 0 && med) { pts.push([cx, syV(w.per1), w.sure]); dots += dot(cx, w.per1, w.sure) }
           const lines: TipLine[] = [`${stamp(w.st * 1000).replace(/ [A-Z]{2,5}$/, '')} to ${hm(w.end * 1000)}`,
@@ -1187,7 +1217,21 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
           if (a + DAY <= first) return
           if (!ws.length) { out += `<rect x="${x}" y="${top}" width="${cw}" height="${laneH}" fill="url(#wIdle)"/>`; return }
           const pk = Math.max(...ws.map(w => w.peak))
-          out += upBar(x + (cw - bw) / 2, syP(pk), bw, Math.max(2, (pk / 100) * laneH), ME, +climbOp(pk))
+          // the bar split by the models behind that day's highest window, in
+          // Daily's order with Daily's 1px gap between segments
+          const top1 = ws.find(w => w.peak === pk)!, mx = mixOf(top1)
+          const g = mx ? mx.tot : {}, gs = Object.values(g).reduce((p, q) => p + q, 0)
+          const hAll = Math.max(2, (pk / 100) * laneH), bx = x + (cw - bw) / 2
+          if (gs > 0) {
+            const parts = [...MODEL_ORDER, ...Object.keys(g).filter(k => !MODEL_ORDER.includes(k))].filter(k => (g[k] ?? 0) > 0)
+            let y = syP(0)
+            parts.forEach((m, j) => {
+              const h = hAll * (g[m]! / gs); y -= h
+              out += parts.length - 1 === j ? upBar(bx, y, bw, Math.max(0.5, h - (j > 0 ? 1 : 0)), modelCol(m), +climbOp(pk))
+                : `<rect x="${bx}" y="${y + 1}" width="${bw}" height="${Math.max(0.5, h - 1)}" fill="${modelCol(m)}" fill-opacity="${climbOp(pk)}"/>`
+              seen.add(m)
+            })
+          } else { out += upBar(bx, syP(pk), bw, hAll, ME, +climbOp(pk)); seen.add('violet') }
           const vals = ws.filter(w => w.per1 > 0).map(w => w.per1)
           if (vals.length && med) {
             const m = median(vals), cx = x + cw / 2, sure = ws.some(w => w.sure && w.per1 > 0)
@@ -1243,7 +1287,9 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       windows = {
         svg: svgDoc(H, out), alt: `${inR.length} 5H windows over ${range} days${hot ? `, ${hot} reached 90%` : ''}${med ? `, usual ${fmt(med)} work units per 1%` : ''}`,
         right, rightBad: right.startsWith('Down'),
-        legend: [{ name: range === 7 ? 'Window climb' : 'Highest climb that day', col: ME }, ...(p7.length ? [{ name: '7D', col: COLD }] : []),
+        legend: [...[...MODEL_ORDER, ...[...seen].filter(k => k !== 'else' && k !== 'violet' && !MODEL_ORDER.includes(k))].filter(k => seen.has(k)).map(k => ({ name: nameOf(k), col: modelCol(k) })),
+          ...(seen.has('else') ? [{ name: nameOf('else'), col: modelCol('else') }] : []),
+          ...(seen.has('violet') ? [{ name: range === 7 ? 'Window climb' : 'Highest climb that day', col: ME }] : []), ...(p7.length ? [{ name: '7D', col: SEVEN }] : []),
           { name: 'Bigger limit', col: UP, glyph: '●' }, { name: 'Smaller limit', col: DOWN, glyph: '●' }, { name: 'Under 15% used', col: DIM, glyph: '○' },
           ...(range === 7 ? [] : [{ name: 'Range that day', col: DIM, glyph: '│' }]),
           ...(med ? [{ name: `Usual ${fmt(med)}`, col: DIM, glyph: '┄' }, { name: 'Normal ±10%', col: mix(CARD, HIST, 0.5) }] : []),
@@ -1486,7 +1532,7 @@ const manualText = (v: View | null, last: number | null, now: number, ledger: Le
   L.push('- **Daily**: work per day, one colour per model, in **% of 7D** (work units over the current 7D window\'s units per 1%; plain work units until there is a 7D reading). Hatched on top: **elsewhere**, each elsewhere point times its window\'s work per 1%, on the day of the reading that showed it (the tooltip says "since" when it started on an earlier day). Elsewhere only shows between two readings, so a day with none says **not measured**.')
   L.push('- **5H pace**: this window\'s readings against past windows, with the projection to 100% and an even pace (dashed: 100% at reset). Clock times sit under the hours. Usual is the middle past window at each minute; the usual range is the middle half of them. Both follow the range buttons: the windows that started in the last 7, 30 or 90 days. The line is in model colours, as in Daily: each rise takes the colour of the model that did most of the work behind it (weighed at the weights in use), and the band below each flat stretch is split by each model\'s share of the rise before it, so a model that helped but never led still shows. The legend lists every model that did work here this window with its share of that work. A rise with no work here is grey, **Elsewhere**. The projection and the dot take the colour of the last model that did work here. Sonnet is blue, Mythos orange, and a model with no list price grey, **Other**.')
   L.push('- **7D pace** (in model colours, as in 5H pace): this week against an even pace (100% at reset) and last week; once 3 past weeks are logged, against their middle half, like 5H pace. 7D readings are kept 120 days for this.')
-  L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb), with the 7D meter behind it in blue on the same scale (it drops to 0 where 7D resets). A climb gets stronger from 50% and is solid violet at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
+  L.push('- **5H windows**: every 5H window on a real timeline. Top: how far each window climbed (7D: its readings as steps, thinned to one point per 5 minutes; 30D and 90D: each day\'s highest climb), with the 7D meter behind it in dark grey on the same scale (it drops to 0 where 7D resets). Climbs are in model colours, as in Daily: 7D bands each rise by each model\'s share of it (as 5H pace); 30D and 90D stack the day\'s highest climb by its window\'s share of work per model. A window whose readings have no per-model figures stays violet. A climb gets stronger from 50% and is solid at 100%. Bottom: work per 1% in each window, weighed at the measured model weights (as in the Limit check), so a window run on a pricier model, such as Fable, does not look like a smaller limit. The left scale is work units, the right the same figure in Opus dollars at list price (1 unit is $2 per million tokens): what that work would cost through the API on Opus, not what a subscription costs. Usual is the median of every solid window; the shaded band is ±10% around it (windows normally scatter 5 to 7%). Green above usual (a bigger limit), red below (a smaller one), full colour at 10% off. The scale runs from the lowest to the highest solid window on show, never narrower than usual ±15%. A waveform joins the dots, filled to the usual line. Hollow dots used under 15% (elsewhere points not counted) and are rough: the line through them is dashed and the fill skips them. A window with under 8 points of work here has no figure (the meter shows whole points, so smaller windows read 15 to 40% low). 30D and 90D show the middle of each day\'s windows, with a line for their range. The header calls a trend only from 8 solid windows, and only at 15% or more: a run of Fable-heavy windows can sit about 9% low.')
   L.push('- **Limit by time**: work per 1% of 5H by weekday and 4-hour block, against the usual figure (kept 180 days, so the range buttons do not change it). Green is a bigger limit, red a smaller one, as in 5H windows. Built from single ticks, not windows, since a window can span a morning and an afternoon. Work is model-adjusted, so a slot where you used a pricier model does not look like a smaller limit. Left out: ticks over 90 minutes or crossing a block, and elsewhere ticks. Usual is all kept ticks pooled. Same colour rules as 5H windows: faint at usual, full colour at 10% off, and the header names a slot only at 15% or more. A cell is an outline, too little data to trust, when it pools under 3 days or its 90% range is wider than 15%. The range is measured between days, not ticks: ticks from one session share its models and way of working, so a single busy morning is one sample however many ticks it has. This measures how much the limit holds at that time, not how much you got done. A row pools every matching weekday, so the right edge says how many days went in, not a date.')
   L.push('- **Hover** any chart for a crosshair and the raw numbers.')
   L.push('- **Projects**: work by the folder a session ran in (a worktree counts as its repository). Over 30 or 90 days a project can pass 100%: more than one week\'s limit. **Hours**: work by weekday and hour, local time.')
