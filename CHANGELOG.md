@@ -2,6 +2,12 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## Unreleased
+
+- **Band buttons are spaced out.**  ▤, ⓘ and ⊕/⊖ sat touching, so each was a small target; both band sizes now leave one cell between them.
+- **No lost presses during a refresh.**  The spinner turned about 6 times a second while a refresh ran, and every frame redrew the band and replaced its buttons, so a press often fell between two frames and did nothing (a refresh runs when a session opens and every 2 minutes).  The spinner now holds one glyph while it waits.
+- **`/manapool close`, `/manapool mini` and `/manapool full`.**  Close the manual and History panes, and set the band's size, from the prompt.  On Windows 10 a background session (and some terminal apps) runs on the system console, which drops mouse input, so a pane opened with `/manapool` could not be closed there.
+
 ## 0.7.19 (2026-11-22)
 
 - **History pane draws again, for real.**  The app draws nothing once all the pane's charts together pass 262,144 characters.  On a busy month at 30D the pane was already near it (254,712 in 0.7.14), and the model-coloured 5H windows took it to 262,729.  Hours, the biggest chart, is now about 20% smaller: empty cells have no tooltip (it only said "No work"), and a cell's hover target outlines itself instead of carrying a second shape.  The same month now comes to 244,920.

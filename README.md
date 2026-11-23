@@ -56,6 +56,7 @@ Plus:
 - `/manapool` opens the manual and prints the key numbers as plain text, for surfaces that cannot draw the band (a phone, for example).
 - `/manapool export` writes the window ledger to `~/Documents/Mana Pool/manapool-ledger.csv`.
 - `/manapool test-notify` sends a test notification.
+- `/manapool close` closes the manual and History panes, and `/manapool mini` or `/manapool full` sets the band's size, for terminals where clicks do not arrive (on Windows 10, background sessions and some terminal apps).
 - A toast when a warning gets worse, and a system notification when the 5-hour limit will run out within about 30 minutes (once per window). On macOS it uses a native notification when Claude Code's own cannot show.
 
 ## Requirements
