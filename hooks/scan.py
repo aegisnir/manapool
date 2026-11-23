@@ -1785,9 +1785,25 @@ if SAMPLES_FILE:
     # A finished window's readings go out slimmed to time, percent and window:
     # the mod reads the heavy fields (work per model) only for the current
     # windows, and 120 days of full readings would be megabytes on every scan.
+    # A finished 5H reading from the last 91 days (the History pane's longest
+    # range) also keeps "u" (0.7.16): each model family's work since its window
+    # started, in thousands of units at the weights row_mix uses, so the 5H
+    # windows chart can colour each climb by model.  About 20 bytes a reading.
+    def fam_units(ms):
+        fam_u = {}
+        for m, t in ms.items():
+            fam = key_of(m) or "other"
+            ww = w(fam, float("inf") if "#long" in m else 0, ver_of(m) or None, "#fast" in m) if fam != "other" else price("sonnet", NEWEST["sonnet"], 0)
+            fam_u[fam] = fam_u.get(fam, 0.0) + cost({"i": t[0], "o": t[1], "w": t[2], "r": t[3]}, ww)
+        return {f: round(u / 1000) for f, u in fam_u.items() if round(u / 1000) > 0}
+
+    def slim(s):
+        o = {"at": s["at"], "ts": s.get("ts", 2), "kind": s["kind"], "pct": s["pct"], "resetsAt": s["resetsAt"]}
+        if s["kind"] == "five_hour" and isinstance(s.get("models"), dict) and s["at"] >= now - 91 * 86400:
+            o["u"] = fam_units(s["models"])
+        return o
     out["_samples"] = [s if not s.get("resetsAt") or s.get("kind") not in SPAN or win_bounds(s["kind"], s["resetsAt"])[1] > now
-                       else {"at": s["at"], "ts": s.get("ts", 2), "kind": s["kind"], "pct": s["pct"], "resetsAt": s["resetsAt"]}
-                       for s in samples] if SAMPLES_FILE else samples
+                       else slim(s) for s in samples] if SAMPLES_FILE else samples
 
 out["_unpriced"] = unpriced  # model id -> calls left out (not in the price table)
 out["_history"] = {"full": _hfull, "days": {k: _hdays[k] for k in sorted(_hdays)[-HIST_SEND:]}}

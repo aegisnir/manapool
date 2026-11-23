@@ -403,3 +403,28 @@ test('History 7D: 5H windows climbs in model colours', async ($, on) => {
   expect(win).not.toMatch(/url\(#wClimb\)"/) // no single-colour climb left
   await ui.unmount()
 })
+
+// 0.7.16: finished windows arrive slimmed, with each family's work as "u"
+// (thousands of units, cumulative); the climbs still split by model.
+test('History 7D: a finished window colours by model from slimmed readings', async ($, on) => {
+  const now = NOW / 1000, ra7 = iso(NOW + 3 * 86400e3), raOld = iso(NOW - 20 * 3600e3)
+  const samples: any[] = [
+    { at: now - 24 * 3600, kind: 'five_hour', pct: 10, resetsAt: raOld, u: { opus: 900 } },
+    { at: now - 23 * 3600, kind: 'five_hour', pct: 40, resetsAt: raOld, u: { opus: 900, fable: 2800 } },
+  ]
+  const view = viewOf(0, 10, { wins: [{ kind: 'five_hour', pct: 0, resetsAt: iso(NOW + 2 * 3600e3), tokens: tok },
+    { kind: 'seven_day', pct: 10, resetsAt: ra7, tokens: tok }], samples })
+  on('state.get', (_: unknown, e: any) => {
+    if (e.key === 'hist') return { value: { value: { shape: 'hist-1', value: view }, version: 1 } }
+    if (e.key === 'range') return { value: { value: { shape: 'range-1', value: 7 }, version: 1 } }
+    return { value: { value: undefined, version: 0 } }
+  })
+  on('store.get', () => ({ value: [] }))
+  const ui = await $.ui.mount({ plugin: 'manapool', component: 'Pane', requestId: 'manapool-history', surface: 'desktop',
+    props: { title: 'Mana Pool History', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } } as any)
+  const svgs = ((await ui.findAll({ type: 'Svg' })) as any[]).map(x => String(x.props?.source ?? x.source ?? ''))
+  const win = svgs.find(s => s.includes('Climb of each window')) ?? ''
+  expect(win).toMatch(/stroke="#eac75e"/) // the Fable rise
+  expect(win).toMatch(/stroke="#8d7cd5"/) // the Opus rise
+  await ui.unmount()
+})

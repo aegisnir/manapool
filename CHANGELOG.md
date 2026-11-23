@@ -2,6 +2,10 @@
 
 All notable changes to Mana Pool. Versions follow `version` in `.claude-plugin/plugin.json`. To update an installed copy: `claude plugin update manapool@manapool` from a shell; the new version loads in the next session.
 
+## 0.7.16 (2026-11-22)
+
+- **5H windows really show model colours.**  0.7.15 only coloured the open window: the scan sends finished windows' readings without their per-model figures (to keep each scan small), so every past climb stayed violet.  Finished 5H readings from the last 91 days now carry each model family's work so far, in thousands of units (about 20 bytes a reading), and the chart colours them from that.
+
 ## 0.7.15 (2026-11-22)
 
 - **5H windows in model colours.**  The climb lane is split by model the way Daily is.  7D: each window's climb is banded by each model's share of every rise (the 5H pace bands), the line in the colour of the model that led it.  30D and 90D: the day's highest climb is a stacked bar, one segment per model in Daily's order, sized by that window's share of the work (at the weights in use).  Climbs still get stronger from 50%.  The legend names the models on show; windows whose readings have no per-model figures (before 0.7.1) stay violet.

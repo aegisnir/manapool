@@ -1086,12 +1086,17 @@ const historyView = (v: View, ledger: LedgerRow[], range: HistRange, last: numbe
       const climbOp = (pk: number) => (0.5 + 0.5 * Math.min(1, Math.max(0, (pk - 50) / 50))).toFixed(1)
       // Model colours (0.7.15), as Daily: each window's climb split by the
       // models that did the work behind it, read from the per-model figures its
-      // readings carry (cumulative since the window started).  A window whose
-      // readings have none (before 0.7.1, or readings gone) stays violet.
+      // readings carry (cumulative since the window started): the open
+      // window's full figures, or a finished one's "u" (0.7.16: scan.py sends
+      // finished readings slimmed, with each family's work in thousands of
+      // units).  A window whose readings have neither (before 0.7.1, over 91
+      // days old, or readings gone) stays violet.
       const mixOf = (w: W5): Mix | null => {
-        if (!w.ss.length || w.ss.some(s => !s.models)) return null
+        if (!w.ss.length) return null
+        const cum = w.ss.every(s => s.models) ? (s: Sample) => unitsOf(s.models!) : w.ss.every(s => s.u) ? (s: Sample) => s.u! : null
+        if (!cum) return null
         let prev: Record<string, number> = {}
-        const sh = w.ss.map(s => { const u = unitsOf(s.models!); const g = gainOf(prev, u); prev = u; return g })
+        const sh = w.ss.map(s => { const u = cum(s); const g = gainOf(prev, u); prev = u; return g })
         const shAll = [sh[0]!, ...sh, sh[sh.length - 1]!]
         return { ks: shAll.map(leadOf), sh: shAll, tot: prev }
       }
